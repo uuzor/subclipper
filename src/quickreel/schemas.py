@@ -82,6 +82,26 @@ class ProjectCreateIn(BaseModel):
     source_url: HttpUrl | None = None
 
 
+class UrlIngestIn(BaseModel):
+    """Attach a remote video URL to an existing project."""
+
+    source_url: HttpUrl
+    title: str | None = Field(default=None, max_length=500)
+
+
+class RemoteProbeOut(BaseModel):
+    """Metadata for a URL, fetched without downloading the media."""
+
+    url: str
+    title: str = ""
+    uploader: str = ""
+    duration_seconds: float = 0.0
+    thumbnail: str = ""
+    extractor: str = ""
+    webpage_url: str = ""
+    downloader: str = ""
+
+
 class RenderRequest(BaseModel):
     clip_ids: list[str] | None = None
     max_clips: int = Field(default=3, ge=1, le=20)

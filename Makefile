@@ -1,4 +1,4 @@
-.PHONY: install install-ai test lint fmt run worker clean
+.PHONY: install install-ai install-download install-all test lint fmt run worker clean
 
 install:
 	python3 -m venv .venv
@@ -7,6 +7,12 @@ install:
 
 install-ai:
 	.venv/bin/pip install -e ".[dev,ai]"
+
+install-download:
+	.venv/bin/pip install -e ".[dev,download]"
+
+install-all:
+	.venv/bin/pip install -e ".[dev,ai,download]"
 
 test:
 	.venv/bin/python -m pytest

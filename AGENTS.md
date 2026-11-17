@@ -13,7 +13,7 @@ optimisation). Treat that package as the product; the rest is plumbing.
 ```bash
 make install      # venv + core deps
 make install-ai   # optional heavy deps: faster-whisper, google-generativeai, librosa
-make test         # pytest (32 tests)
+make test         # pytest
 make lint         # ruff check src tests
 make fmt          # ruff format src tests
 make run          # uvicorn on port 12000
@@ -44,6 +44,12 @@ Always run `make lint` and `make test` before finishing a change. Both must pass
   model that cannot explain itself.
 - Shell out to ffmpeg only through `media/ffmpeg.py`, and only with argument
   lists, never shell strings.
+- Every user-supplied URL must pass `media/url_source.validate_source_url` before
+  any outbound request. Do not call a downloader with an unvalidated URL, and do
+  not bypass the DNS check: it is the SSRF boundary.
+- Downloaders live behind the `VideoDownloader` protocol in
+  `media/downloader.py`. Tests use `FakeDownloader` (installed with
+  `set_downloader`) so no test touches the network.
 - Settings go in `config.py` under the `QUICKREEL_` prefix and must be documented
   in `.env.example`.
 
@@ -62,8 +68,19 @@ Always run `make lint` and `make test` before finishing a change. Both must pass
   Tests call `reset_engine()` to drop cached engines between cases.
 - Celery is configured with `memory://` when `QUICKREEL_REDIS_URL` is empty, so
   `task_always_eager=true` runs everything inline.
-- URL ingestion returns `501` on purpose: remote download needs a rights check
-  first. Do not enable it without one.
+- URL ingestion is enabled and goes through the SSRF guard in
+  `media/url_source.py`. It needs the optional `download` extra (`yt-dlp`); with
+  yt-dlp absent the registry returns a fake that fails URL requests with a clear
+  message, so the app still boots. A URL project downloads during `ingest` and
+  its `MediaAsset.path` is empty until then; code that touches the path must
+  tolerate `""`.
+- Do not pass `max_filesize` to yt-dlp. A value of `0` means "zero bytes" and
+  silently downloads nothing; yt-dlp reports success with no file. Size is
+  enforced after download in `YtDlpDownloader.download`.
+- YouTube blocks datacenter IPs, so a real download from this environment can
+  fail with `HTTP Error 403` even for a public video. That is a network/geo
+  restriction, not a bug; metadata probing still works. Use
+  `QUICKREEL_DOWNLOADER_PROXY` or a cookies file if you need real media.
 - `Transcript.segments` and `Clip.score_breakdown` are JSON columns; schema
   changes there need no migration but do need readers to tolerate old rows.
 - The `ai` extra pins `av<16`. faster-whisper 1.2.x calls `av.open(...,

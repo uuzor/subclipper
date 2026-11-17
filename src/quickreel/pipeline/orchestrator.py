@@ -29,6 +29,8 @@ from ..analysis.scoring import ViralScorer
 from ..config import get_settings
 from ..logging_setup import get_logger
 from ..media import ffmpeg
+from ..media.downloader import DownloadError, get_downloader
+from ..media.url_source import SourceUrlError, validate_source_url
 from ..models import Clip, ClipStatus, MediaAsset, Project, ProjectStatus, Transcript
 
 logger = get_logger(__name__)
@@ -85,7 +87,15 @@ class Pipeline:
         )
         if asset is None:
             raise PipelineError("project has no media asset to ingest")
-        if not Path(asset.path).exists():
+
+        # A URL project has no local file yet; fetch it now so that every later
+        # stage only ever deals with a local path.
+        if project.source_kind == "url" and (
+            not asset.path or not Path(asset.path).exists()
+        ):
+            self._download_remote(project, asset)
+
+        if not asset.path or not Path(asset.path).exists():
             project.error = f"media file missing at {asset.path}"
             self._set_status(project, ProjectStatus.ingesting_failed)
             raise PipelineError(project.error)
@@ -96,7 +106,12 @@ class Pipeline:
         asset.height = info.height
         asset.fps = info.fps
         asset.has_audio = info.has_audio
+        # Preserve any download metadata recorded for a URL source; assigning
+        # the ffprobe payload directly would drop it.
+        download_info = (asset.probe or {}).get("download")
         asset.probe = info.raw
+        if download_info is not None:
+            asset.probe = {**info.raw, "download": download_info}
         self.session.commit()
         logger.info(
             "ingest.probed",
@@ -105,6 +120,56 @@ class Pipeline:
             size=f"{info.width}x{info.height}",
         )
         return asset
+
+    def _download_remote(self, project: Project, asset: MediaAsset) -> None:
+        """Fetch ``project.source_url`` into the uploads directory.
+
+        The URL is re-validated here even though the API validates it on create:
+        the stored value is what we act on, and validation is cheap next to a
+        download. This is the last line of defence against SSRF.
+        """
+        if not self.settings.url_ingestion_enabled:
+            raise PipelineError("URL ingestion is disabled on this server")
+        if not project.source_url:
+            raise PipelineError("project is marked as a URL source but has no URL")
+
+        try:
+            validated = validate_source_url(
+                project.source_url,
+                allowed_hosts=self.settings.allowed_source_host_list,
+            )
+        except SourceUrlError as exc:
+            project.error = str(exc)
+            raise PipelineError(f"rejected source URL: {exc}") from exc
+
+        downloader = get_downloader()
+        stem = project.id
+        destination = self.settings.uploads_dir
+        logger.info(
+            "ingest.download_start",
+            project_id=project.id,
+            host=validated.host,
+            downloader=downloader.name,
+        )
+        try:
+            result = downloader.download(validated.url, destination, stem)
+        except DownloadError as exc:
+            project.error = str(exc)
+            raise PipelineError(f"could not download source video: {exc}") from exc
+
+        asset.path = str(result.path)
+        asset.size_bytes = result.size_bytes
+        if result.info.title and project.title in {"", "Untitled project"}:
+            project.title = result.info.title[:500]
+        if result.info.raw:
+            asset.probe = {"download": result.info.raw}
+        self.session.commit()
+        logger.info(
+            "ingest.download_done",
+            project_id=project.id,
+            bytes=result.size_bytes,
+            extractor=result.info.extractor,
+        )
 
     def transcribe(self, project: Project, asset: MediaAsset) -> TranscriptResult:
         self._set_status(project, ProjectStatus.transcribing)

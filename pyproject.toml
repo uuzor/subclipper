@@ -27,6 +27,9 @@ ai = [
     "librosa>=0.10",
     "numpy>=1.26",
 ]
+download = [
+    "yt-dlp>=2025.1",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

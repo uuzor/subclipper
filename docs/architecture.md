@@ -19,6 +19,44 @@ transition. Each stage is a method, so it can be retried or tested alone.
 `QUICKREEL_TASK_ALWAYS_EAGER=true` the task executes in-process and no broker is
 needed.
 
+## Ingestion sources
+
+A project starts from one of two sources, and both converge before `probe`:
+
+- **Upload** (`POST /api/v1/projects/{id}/upload`) writes the file to the uploads
+  directory and records its path on the `MediaAsset`.
+- **URL** (`POST /api/v1/projects` with `source_url`, or
+  `POST /api/v1/projects/{id}/source-url`) records `source_kind="url"` and the
+  URL, plus a `MediaAsset` with an empty path. During `ingest`, the pipeline
+  downloads the video with yt-dlp and fills in the path.
+
+Everything downstream sees only a local file path, so URL and upload projects are
+indistinguishable from the transcription stage onward.
+
+### SSRF protection
+
+`media/url_source.py` is the single gate for user-supplied URLs. It enforces a
+scheme allowlist, rejects embedded credentials, applies an optional host
+allowlist, and resolves the hostname to check that every address is globally
+routable. Private, loopback, link-local, reserved and cloud-metadata addresses
+are refused, including IPv4-mapped IPv6 forms and public names that resolve to
+private addresses. The check runs on project creation and again inside the
+pipeline immediately before the download, so the value actually fetched is the
+value validated.
+
+### Downloader abstraction
+
+`media/downloader.py` defines a small `VideoDownloader` protocol with `probe`
+(metadata only) and `download`. `YtDlpDownloader` is the real implementation;
+`FakeDownloader` copies a local file and needs no network, which is what the test
+suite uses. `get_downloader()` selects the implementation and degrades to a fake
+that reports a clear error when yt-dlp is not installed, so the app never fails
+to boot because of an optional dependency.
+
+Downloads are capped by resolution (`download_max_height`) and by size
+(`max_upload_bytes`), and `noplaylist` keeps a playlist link from fanning out into
+many downloads.
+
 ## Why a multi-model pipeline
 
 No single model does every job well. Speech recognition, visual understanding
@@ -104,10 +142,14 @@ S3-compatible backend behind the same interface for multi-node deployments.
 ## Data model
 
 ```
-Project 1─1 MediaAsset
+Project 1─1 MediaAsset      (path filled at upload, or after URL download)
 Project 1─1 Transcript      (segments JSON: start, end, text, speaker)
 Project 1─n Clip            (boundaries, score, score_breakdown, render_path)
 ```
+
+`Project.source_kind` is `upload` or `url`; `Project.source_url` holds the
+validated link for URL projects. A URL project's `MediaAsset` starts with an
+empty path, which the ingest stage fills in once the download completes.
 
 `Clip` keeps both the raw detector boundaries and the optimised boundaries, so
 the effect of boundary optimisation is always auditable.

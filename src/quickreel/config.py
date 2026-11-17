@@ -55,6 +55,19 @@ class Settings(BaseSettings):
     render_timeout_seconds: int = 900
     max_upload_mb: int = 2048
 
+    # Remote URL ingestion
+    url_ingestion_enabled: bool = True
+    # Comma-separated host allowlist. Empty means "any public host" (still
+    # subject to the SSRF checks in media/url_source.py).
+    allowed_source_hosts: str = ""
+    # Cap on downloaded resolution. Clips render to 1080x1920, so pulling 4K
+    # source is wasted bandwidth and disk.
+    download_max_height: int = 1080
+    download_timeout_seconds: int = 1800
+    # Netscape-format cookies file, for sites that require a logged-in session.
+    downloader_cookies_file: str = ""
+    downloader_proxy: str = ""
+
     # Scoring. Weights must sum to 1.0; calibrated against real engagement
     # data later (see docs/architecture.md, "Viral Intelligence").
     scoring_weights: dict[str, float] = Field(
@@ -92,6 +105,12 @@ class Settings(BaseSettings):
     @property
     def max_upload_bytes(self) -> int:
         return self.max_upload_mb * 1024 * 1024
+
+    @property
+    def allowed_source_host_list(self) -> tuple[str, ...]:
+        return tuple(
+            part.strip() for part in self.allowed_source_hosts.split(",") if part.strip()
+        )
 
     def ensure_directories(self) -> None:
         for directory in (
