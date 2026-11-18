@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
 
+    # When a real provider is selected, a runtime failure normally degrades to
+    # the deterministic fake so one flaky stage does not sink the whole run. Set
+    # this to false to fail the project instead, which is what you want in
+    # production where fake output is worse than no output.
+    allow_provider_fallback: bool = True
+
     # Gemini
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash"

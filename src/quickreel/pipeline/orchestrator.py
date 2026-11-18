@@ -44,6 +44,9 @@ class Pipeline:
     def __init__(self, session: Session) -> None:
         self.session = session
         self.settings = get_settings()
+        # Set by detect_moments so run() can record provenance without building
+        # the moment provider a second time.
+        self._moment_provider_name = "unknown"
 
     # -- public entry point ------------------------------------------------
 
@@ -53,15 +56,23 @@ class Pipeline:
             raise PipelineError(f"project {project_id} not found")
 
         stage = "ingesting"
+        provenance: dict[str, str] = {}
         try:
             asset = self.ingest(project)
             stage = "transcribing"
             audio_path = self.extract_audio(asset)
             transcript_result = self.transcribe(project, asset, audio_path)
+            provenance["transcription"] = transcript_result.provider
             stage = "analyzing"
-            audio_events = self.analyze_audio(audio_path)
+            audio_events, audio_provider = self.analyze_audio(audio_path)
+            provenance["audio"] = audio_provider
             visual = self.analyze_visual(asset, transcript_result)
+            provenance["vision"] = visual.provider
             self.detect_moments(project, asset, transcript_result, visual, audio_events)
+            provenance["moment"] = self._moment_provider_name
+            # Record what actually served each stage so a degraded run is
+            # auditable even though it succeeded.
+            project.providers = provenance
             self._set_status(project, ProjectStatus.ready)
         except Exception as exc:  # noqa: BLE001 - recorded on the project row
             logger.error("pipeline.failed", project_id=project_id, stage=stage, error=str(exc))
@@ -206,11 +217,11 @@ class Pipeline:
         )
         return result
 
-    def analyze_audio(self, audio_path: Path) -> list[AudioEvent]:
+    def analyze_audio(self, audio_path: Path) -> tuple[list[AudioEvent], str]:
         analyzer = get_audio_analyzer()
         events = analyzer.analyze(audio_path)
         logger.info("audio.analyzed", events=len(events), provider=analyzer.name)
-        return events
+        return events, analyzer.name
 
     def analyze_visual(self, asset: MediaAsset, transcript: TranscriptResult) -> VisualAnalysis:
         provider = get_vision_provider()
@@ -225,8 +236,9 @@ class Pipeline:
         audio_events: list[AudioEvent],
     ) -> list[Clip]:
         self._set_status(project, ProjectStatus.analyzing)
+        moment_provider = get_moment_provider()
         selector = MomentSelector(
-            provider=get_moment_provider(),
+            provider=moment_provider,
             scorer=ViralScorer(),
             optimizer=BoundaryOptimizer(),
         )
@@ -271,6 +283,7 @@ class Pipeline:
             clips.append(clip)
         self.session.commit()
         logger.info("moments.persisted", project_id=project.id, clips=len(clips))
+        self._moment_provider_name = moment_provider.name
         return clips
 
     # -- helpers -----------------------------------------------------------

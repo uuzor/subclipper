@@ -58,6 +58,9 @@ class Project(Base):
         Enum(ProjectStatus, native_enum=False), default=ProjectStatus.created
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Which provider actually served each stage. Empty until the pipeline runs.
+    # Recorded so a silently degraded run is auditable after the fact.
+    providers: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now

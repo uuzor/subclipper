@@ -236,3 +236,86 @@ def test_llm_moment_provider_recovers_after_transient_failure(monkeypatch):
     result = provider.detect(_transcript_with_segments(2), VisualAnalysis(), [])
     assert len(result.moments) == 1
     assert attempts["n"] == 2
+
+
+# --- additive schema migration ------------------------------------------------
+
+
+def test_init_db_adds_missing_columns_to_existing_table(tmp_path):
+    from sqlalchemy import create_engine, inspect, text
+
+    from quickreel.db import _add_missing_columns
+
+    db_path = tmp_path / "legacy.db"
+    engine = create_engine(f"sqlite+pysqlite:///{db_path}")
+    # Simulate an older install: projects table without the providers column.
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE projects (id VARCHAR(32) PRIMARY KEY, title VARCHAR(500), "
+                "source_kind VARCHAR(32), source_url TEXT, status VARCHAR(32), "
+                "error TEXT, created_at DATETIME, updated_at DATETIME)"
+            )
+        )
+
+    _add_missing_columns(engine)
+
+    columns = {column["name"] for column in inspect(engine).get_columns("projects")}
+    assert "providers" in columns
+    assert {"id", "title"} <= columns  # existing columns untouched
+
+
+def test_init_db_migration_is_idempotent(tmp_path):
+    from sqlalchemy import create_engine
+
+    from quickreel.db import _add_missing_columns
+    from quickreel.models import Base
+
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'fresh.db'}")
+    Base.metadata.create_all(bind=engine)
+    # Running twice must not raise on already-present columns.
+    _add_missing_columns(engine)
+    _add_missing_columns(engine)
+
+
+def test_fallback_proxy_degrades_by_default(monkeypatch):
+    from quickreel.ai.registry import _FallbackProxy
+
+    class Boom:
+        name = "real"
+
+        def transcribe(self, *_a, **_k):
+            raise RuntimeError("api down")
+
+    class Ok:
+        name = "fake"
+
+        def transcribe(self, *_a, **_k):
+            return "fake-result"
+
+    proxy = _FallbackProxy("transcription", Boom(), Ok())
+    assert proxy.transcribe("audio") == "fake-result"
+    assert proxy.name == "fake"
+
+
+def test_fallback_proxy_raises_when_fallback_disabled(monkeypatch):
+    import pytest
+
+    from quickreel import config
+    from quickreel.ai import registry
+
+    monkeypatch.setattr(
+        registry,
+        "get_settings",
+        lambda: config.Settings(allow_provider_fallback=False),
+    )
+
+    class Boom:
+        name = "real"
+
+        def transcribe(self, *_a, **_k):
+            raise RuntimeError("api down")
+
+    proxy = registry._FallbackProxy("transcription", Boom(), object())
+    with pytest.raises(RuntimeError, match="api down"):
+        proxy.transcribe("audio")

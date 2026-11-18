@@ -67,6 +67,7 @@ class ProjectOut(BaseModel):
     source_url: str | None = None
     status: str
     error: str | None = None
+    providers: dict = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 

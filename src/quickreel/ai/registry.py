@@ -21,6 +21,9 @@ class _FallbackProxy:
     Construction-time failures are handled by ``_auto_with_runtime_fallback``. This covers runtime
     failures (a missing model, a transient API error) so one flaky stage does not
     fail the whole pipeline in ``auto`` mode. The fallback is logged, never silent.
+
+    Set ``QUICKREEL_ALLOW_PROVIDER_FALLBACK=false`` to re-raise instead, so a
+    production run fails rather than emitting plausible-looking fake output.
     """
 
     def __init__(self, kind: str, primary, fallback) -> None:
@@ -35,7 +38,7 @@ class _FallbackProxy:
             result = getattr(self._active, method)(*args, **kwargs)
             return result
         except Exception as exc:  # noqa: BLE001 - deliberate graceful degradation
-            if self._active is self._fallback:
+            if self._active is self._fallback or not get_settings().allow_provider_fallback:
                 raise
             logger.warning(
                 "provider.runtime_fallback",

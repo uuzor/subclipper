@@ -14,6 +14,9 @@ from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import get_settings
+from .logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -51,7 +54,45 @@ def init_db() -> None:
     # Import models so they register with the metadata before create_all.
     from . import models  # noqa: F401
 
-    Base.metadata.create_all(bind=get_engine())
+    engine = get_engine()
+    Base.metadata.create_all(bind=engine)
+    _add_missing_columns(engine)
+
+
+def _add_missing_columns(engine: Engine) -> None:
+    """Add columns that exist on the models but not yet in the database.
+
+    There is no migration framework, and ``create_all`` never alters an existing
+    table. Without this, adding a column breaks every existing installation with
+    "no such column". Only additive, nullable/defaulted columns are handled,
+    which is all the schema has needed so far.
+    """
+    from sqlalchemy import inspect, text
+
+    from . import models  # noqa: F401
+
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue
+        present = {column["name"] for column in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in present:
+                continue
+            if not column.nullable and column.default is None and column.server_default is None:
+                logger.warning(
+                    "db.skipped_required_column",
+                    table=table.name,
+                    column=column.name,
+                    reason="cannot add a NOT NULL column without a default",
+                )
+                continue
+            column_type = column.type.compile(engine.dialect)
+            ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {column_type}'
+            with engine.begin() as connection:
+                connection.execute(text(ddl))
+            logger.info("db.added_column", table=table.name, column=column.name)
 
 
 @contextmanager

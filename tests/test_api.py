@@ -64,6 +64,11 @@ def test_full_pipeline_produces_ranked_clips(client, sample_video):
     assert transcript is not None
     assert transcript["segments"]
 
+    # Which provider served each stage must be recorded on the project, so a
+    # degraded run is auditable after the fact.
+    detail = client.get(f"/api/v1/projects/{project_id}").json()
+    assert set(detail["providers"]) == {"transcription", "audio", "vision", "moment"}
+
 
 def test_render_and_download_top_clip(client, sample_video):
     project = _create_and_upload(client, sample_video)
