@@ -107,3 +107,132 @@ def test_provider_protocols_are_satisfied():
     assert isinstance(get_transcription_provider(), TranscriptionProvider)
     assert isinstance(get_vision_provider(), VisionProvider)
     assert isinstance(get_moment_provider(), MomentProvider)
+
+
+# --- real provider behaviour, no network or credentials -----------------------
+
+
+def test_extract_json_tolerates_code_fences_and_prose():
+    from quickreel.ai.providers import _extract_json
+
+    assert _extract_json('```json\n{"moments": [1]}\n```') == {"moments": [1]}
+    assert _extract_json('Sure! Here you go: {"a": 1} hope that helps') == {"a": 1}
+    assert _extract_json("not json at all") == {}
+    assert _extract_json("") == {}
+
+
+def test_transcript_windows_chunk_and_overlap_long_transcripts():
+    from quickreel.ai.providers import _transcript_windows
+
+    segments = [
+        TranscriptSegment(i * 10.0, (i + 1) * 10.0, f"Sentence number {i} padded out.", "S1")
+        for i in range(600)
+    ]
+    transcript = TranscriptResult(language="en", text="", provider="unit", segments=segments)
+
+    windows = _transcript_windows(transcript, max_chars=12000, overlap_seconds=30.0)
+    # A 100-minute transcript must become a handful of bounded calls, not one.
+    assert 2 <= len(windows) <= 10
+    assert all(len(window) <= 12000 + 200 for window in windows)
+    assert any("Sentence number 599" in window for window in windows)
+
+
+def test_transcript_windows_handle_empty_transcript():
+    from quickreel.ai.providers import _transcript_windows
+
+    empty = TranscriptResult(language="en", text="", provider="unit", segments=[])
+    assert _transcript_windows(empty, max_chars=1000, overlap_seconds=10.0) == []
+
+
+def _llm_settings(monkeypatch, **overrides):
+    from quickreel import config
+    from quickreel.ai import providers
+
+    monkeypatch.setattr(
+        providers,
+        "get_settings",
+        lambda: config.Settings(
+            llm_base_url="https://llm.test/v1",
+            llm_model="test-model",
+            llm_api_key="secret",
+            **overrides,
+        ),
+    )
+
+
+def _transcript_with_segments(count: int):
+    segments = [
+        TranscriptSegment(i * 10.0, (i + 1) * 10.0, f"Sentence number {i} here.", "S1")
+        for i in range(count)
+    ]
+    return TranscriptResult(language="en", text="", provider="unit", segments=segments)
+
+
+def test_llm_moment_provider_chunks_and_parses(monkeypatch):
+    import httpx
+
+    _llm_settings(monkeypatch, llm_chunk_chars=200, llm_chunk_overlap_seconds=10.0)
+    from quickreel.ai.providers import LLMMomentProvider
+
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        calls.append(json.loads(request.content))
+        body = {"moments": [{"start": 10.0, "end": 20.0, "title": "T", "hook": "H"}]}
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(body)}}]},
+        )
+
+    provider = LLMMomentProvider(transport=httpx.MockTransport(handler))
+    result = provider.detect(_transcript_with_segments(60), VisualAnalysis(), [])
+
+    assert len(calls) > 1, "long transcript must be chunked into several calls"
+    # Overlapping windows report the same moment; it must be de-duplicated.
+    assert len(result.moments) == 1
+    assert result.moments[0].start == 10.0
+    assert result.provider == "llm-moments"
+
+
+def test_llm_moment_provider_retries_then_raises(monkeypatch):
+    import httpx
+    import pytest
+
+    _llm_settings(monkeypatch, llm_chunk_chars=100000, llm_max_retries=3)
+    from quickreel.ai.providers import LLMMomentProvider, ProviderUnavailable
+
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        return httpx.Response(503, json={"error": "busy"})
+
+    provider = LLMMomentProvider(transport=httpx.MockTransport(handler))
+    with pytest.raises(ProviderUnavailable):
+        provider.detect(_transcript_with_segments(2), VisualAnalysis(), [])
+    assert attempts["n"] == 3, "should retry the configured number of times"
+
+
+def test_llm_moment_provider_recovers_after_transient_failure(monkeypatch):
+    import json
+
+    import httpx
+
+    _llm_settings(monkeypatch, llm_chunk_chars=100000, llm_max_retries=3)
+    from quickreel.ai.providers import LLMMomentProvider
+
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return httpx.Response(500, json={"error": "transient"})
+        body = {"moments": [{"start": 0.0, "end": 5.0, "title": "T"}]}
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(body)}}]})
+
+    provider = LLMMomentProvider(transport=httpx.MockTransport(handler))
+    result = provider.detect(_transcript_with_segments(2), VisualAnalysis(), [])
+    assert len(result.moments) == 1
+    assert attempts["n"] == 2

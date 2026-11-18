@@ -79,8 +79,7 @@ def test_selector_skips_degenerate_candidates():
 
 def test_selector_respects_max_moments():
     candidates = [
-        CandidateMoment(float(i * 30), float(i * 30 + 25), f"Moment {i}")
-        for i in range(6)
+        CandidateMoment(float(i * 30), float(i * 30 + 25), f"Moment {i}") for i in range(6)
     ]
     segments = [
         TranscriptSegment(float(i * 5), float(i * 5 + 5), f"Sentence {i} is complete.", "S1")

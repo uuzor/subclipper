@@ -113,12 +113,18 @@ def test_rejects_hostname_that_resolves_to_loopback():
 
 def test_allowlist_permits_exact_and_subdomain():
     allowed = ("youtube.com", "tiktok.com")
-    assert validate_source_url(
-        "https://youtube.com/watch?v=1", allowed_hosts=allowed, resolve_dns=False
-    ).host == "youtube.com"
-    assert validate_source_url(
-        "https://www.youtube.com/watch?v=1", allowed_hosts=allowed, resolve_dns=False
-    ).host == "www.youtube.com"
+    assert (
+        validate_source_url(
+            "https://youtube.com/watch?v=1", allowed_hosts=allowed, resolve_dns=False
+        ).host
+        == "youtube.com"
+    )
+    assert (
+        validate_source_url(
+            "https://www.youtube.com/watch?v=1", allowed_hosts=allowed, resolve_dns=False
+        ).host
+        == "www.youtube.com"
+    )
 
 
 def test_allowlist_rejects_unlisted_host():

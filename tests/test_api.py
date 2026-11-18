@@ -128,3 +128,45 @@ def test_delete_project_removes_clips(client, sample_video):
 
     assert client.delete(f"/api/v1/projects/{project_id}").status_code == 204
     assert client.get(f"/api/v1/projects/{project_id}").status_code == 404
+
+
+def test_reprocess_replaces_renders_without_orphaning_files(client, sample_video):
+    """Re-processing must delete the old rendered MP4s, not leave them on disk."""
+    project = _create_and_upload(client, sample_video)
+    project_id = project["id"]
+    assert client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+    rendered = client.post(f"/api/v1/projects/{project_id}/render", json={"max_clips": 1}).json()
+    first_render = Path(rendered[0]["render_path"])
+    assert first_render.exists()
+
+    # Re-run the pipeline; the previous clip rows and their files are replaced.
+    assert client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+    assert not first_render.exists(), "stale render should be removed on re-process"
+
+
+def test_render_honours_vertical_flag(client, sample_video):
+    from quickreel.media import ffmpeg
+
+    project = _create_and_upload(client, sample_video)
+    project_id = project["id"]
+    assert client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+
+    # Render the same clip in each orientation. The output path is derived from
+    # the clip id, so probe straight away before the next render overwrites it.
+    vertical = client.post(
+        f"/api/v1/projects/{project_id}/render",
+        json={"max_clips": 1, "vertical": True},
+    ).json()[0]
+    assert vertical["render_meta"]["orientation"] == "vertical"
+    assert (vertical["render_meta"]["width"], vertical["render_meta"]["height"]) == (1080, 1920)
+    v_info = ffmpeg.probe(vertical["render_path"])
+    assert (v_info.width, v_info.height) == (1080, 1920)
+
+    horizontal = client.post(
+        f"/api/v1/projects/{project_id}/render",
+        json={"max_clips": 1, "vertical": False},
+    ).json()[0]
+    assert horizontal["render_meta"]["orientation"] == "horizontal"
+    assert (horizontal["render_meta"]["width"], horizontal["render_meta"]["height"]) == (1920, 1080)
+    h_info = ffmpeg.probe(horizontal["render_path"])
+    assert (h_info.width, h_info.height) == (1920, 1080)

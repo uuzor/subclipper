@@ -47,9 +47,7 @@ YOUTUBE_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 
 def _create_url_project(client, url: str = YOUTUBE_URL, title: str = "Remote clip") -> dict:
-    response = client.post(
-        "/api/v1/projects", json={"title": title, "source_url": url}
-    )
+    response = client.post("/api/v1/projects", json={"title": title, "source_url": url})
     assert response.status_code == 201, response.text
     return response.json()
 
@@ -95,9 +93,7 @@ def test_url_ingestion_can_be_disabled(client, stub_resolver, monkeypatch):
     from quickreel.config import get_settings
 
     monkeypatch.setattr(get_settings(), "url_ingestion_enabled", False)
-    response = client.post(
-        "/api/v1/projects", json={"title": "off", "source_url": YOUTUBE_URL}
-    )
+    response = client.post("/api/v1/projects", json={"title": "off", "source_url": YOUTUBE_URL})
     assert response.status_code == 403
     assert "disabled" in response.json()["detail"]
 
@@ -133,9 +129,7 @@ def test_replacing_source_url_clears_previously_downloaded_file(
     assert first_path and Path(first_path).exists()
 
     other = "https://vimeo.com/12345"
-    response = client.post(
-        f"/api/v1/projects/{project_id}/source-url", json={"source_url": other}
-    )
+    response = client.post(f"/api/v1/projects/{project_id}/source-url", json={"source_url": other})
     assert response.status_code == 200
     assert response.json()["media"]["path"] == ""
     assert not Path(first_path).exists(), "stale download should be removed"
@@ -156,12 +150,8 @@ def test_process_without_source_is_rejected(client):
 # --- probe --------------------------------------------------------------------
 
 
-def test_probe_returns_metadata_without_downloading(
-    client, stub_resolver, fake_downloader
-):
-    response = client.post(
-        "/api/v1/projects/source-url/probe", json={"source_url": YOUTUBE_URL}
-    )
+def test_probe_returns_metadata_without_downloading(client, stub_resolver, fake_downloader):
+    response = client.post("/api/v1/projects/source-url/probe", json={"source_url": YOUTUBE_URL})
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["title"] == "Fake remote video"
@@ -215,9 +205,7 @@ def test_url_project_renders_clip(client, stub_resolver, fake_downloader):
     project_id = project["id"]
     assert client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
 
-    rendered = client.post(
-        f"/api/v1/projects/{project_id}/render", json={"max_clips": 1}
-    )
+    rendered = client.post(f"/api/v1/projects/{project_id}/render", json={"max_clips": 1})
     assert rendered.status_code == 200, rendered.text
     clip = rendered.json()[0]
     assert clip["status"] == "rendered"

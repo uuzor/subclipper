@@ -7,13 +7,10 @@ to recalibrate.
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass, field
 
 from ..ai.base import AudioEvent, TranscriptResult, VisualAnalysis
-
-_SENTENCE_SPLIT = re.compile(r"[.!?]+")
 
 _HOOK_PATTERNS = (
     r"\bthe (biggest|worst|best|only|real) (mistake|reason|lesson|truth)\b",
@@ -40,7 +37,19 @@ _STORY_WORDS = frozenset(
     discovered learned lesson years later""".split()
 )
 
-_FILLER_WORDS = frozenset("um uh er ah like you know basically literally sort of".split())
+# Single-word verbal tics. Deliberately excludes ordinary words that only look
+# like filler in isolation: counting "of", "you" or "know" as filler flagged
+# almost every sentence, including fluent ones.
+_FILLER_WORDS = frozenset("um uh er ah basically literally like".split())
+
+# Multi-word tics, matched against the joined window text so they are not split
+# across segments. They only count when set off by punctuation, because the same
+# words occur in ordinary speech ("most of you know the answer" is not filler).
+_FILLER_PHRASES = ("you know", "sort of", "kind of", "i mean", "you see")
+_FILLER_PHRASE_RE = re.compile(
+    r"(?:^|[,.!?;:])\s*(?:" + "|".join(_FILLER_PHRASES) + r")\s*(?=[,.!?;:]|$)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -93,11 +102,25 @@ def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
 
 
+def _filler_ratio(lowered: str, word_count: int) -> float:
+    """Fraction of the window that is verbal filler.
+
+    Phrases are matched only when punctuated as discourse markers, so the words
+    inside them are never also counted as single-word tics.
+    """
+    if word_count == 0:
+        return 0.0
+    hits = sum(
+        len(match.group(0).strip(" ,.!?;:").split())
+        for match in _FILLER_PHRASE_RE.finditer(lowered)
+    )
+    hits += sum(1 for word in re.findall(r"[\w']+", lowered) if word in _FILLER_WORDS)
+    return _clamp(hits / max(1, word_count))
+
+
 def _window_segments(transcript: TranscriptResult, start: float, end: float) -> list:
     return [
-        segment
-        for segment in transcript.segments
-        if segment.end > start and segment.start < end
+        segment for segment in transcript.segments if segment.end > start and segment.start < end
     ]
 
 
@@ -122,27 +145,17 @@ def extract_features(
         words_per_second=word_count / duration,
     )
 
-    features.hook_strength = _hook_strength(segments, lowered)
-    features.emotional_intensity = _emotional_intensity(words, audio_events, start, end, duration)
-    features.storytelling = _storytelling(lowered, words, features)
-    features.shareability = _shareability(words, features)
-    features.audio_visual_engagement = _audio_visual_engagement(
-        audio_events, visual, start, end, duration
-    )
-    features.standalone_context = _standalone_context(segments, features)
-
+    # Populate the scalar signals first. The component functions below read
+    # speaker_changes, filler_ratio and question_opening, so computing them
+    # afterwards would score every clip against default (zero) inputs.
     features.question_opening = bool(segments) and segments[0].text.strip().endswith("?")
-    features.filler_ratio = _clamp(
-        sum(1 for w in words if w in _FILLER_WORDS) / max(1, word_count)
-    )
+    features.filler_ratio = _filler_ratio(lowered, word_count)
     silences = [
         event
         for event in audio_events
         if event.kind == "silence" and event.start >= start and event.end <= end
     ]
-    features.silence_ratio = _clamp(
-        sum(event.end - event.start for event in silences) / duration
-    )
+    features.silence_ratio = _clamp(sum(event.end - event.start for event in silences) / duration)
     features.speaker_changes = _count_speaker_changes(segments)
     features.audio_event_kinds = sorted(
         {
@@ -151,6 +164,17 @@ def extract_features(
             if event.kind != "silence" and event.end > start and event.start < end
         }
     )
+
+    # Component scores. ``standalone_context`` also sets starts_mid_sentence and
+    # ends_on_complete_sentence, which the penalty rules consume.
+    features.hook_strength = _hook_strength(segments, lowered)
+    features.emotional_intensity = _emotional_intensity(words, audio_events, start, end, duration)
+    features.storytelling = _storytelling(lowered, words, features)
+    features.shareability = _shareability(words, features)
+    features.audio_visual_engagement = _audio_visual_engagement(
+        audio_events, visual, start, end, duration
+    )
+    features.standalone_context = _standalone_context(segments, features)
     return features
 
 
@@ -246,8 +270,10 @@ def _audio_visual_engagement(
         and event.start < end
     ]
     audio_score = _clamp(
-        sum(event.intensity * _clamp((min(event.end, end) - max(event.start, start)) / duration * 3)
-            for event in loud)
+        sum(
+            event.intensity * _clamp((min(event.end, end) - max(event.start, start)) / duration * 3)
+            for event in loud
+        )
     )
     scene_hits = sum(1 for scene in visual.scenes if start <= scene.time <= end)
     visual_score = _clamp(scene_hits / max(1, duration / 20) * 0.5)
@@ -259,7 +285,9 @@ def _audio_visual_engagement(
 def _standalone_context(segments: list, features: MomentFeatures) -> float:
     if not segments:
         return 0.0
-    score = 1.0
+    # Start below 1.0 so the positive signals below can actually raise the score;
+    # starting at the ceiling made the question bonus a no-op.
+    score = 0.85
     first = segments[0].text.strip()
     last = segments[-1].text.strip()
 
@@ -297,12 +325,3 @@ def _count_speaker_changes(segments: list) -> int:
         if speaker:
             previous = speaker
     return changes
-
-
-def sentence_count(text: str) -> int:
-    return max(1, len([part for part in _SENTENCE_SPLIT.split(text) if part.strip()]))
-
-
-def seconds_to_words(seconds: float, words_per_second: float = 2.6) -> int:
-    """Rough spoken-word estimate used for length heuristics."""
-    return int(math.ceil(seconds * words_per_second))

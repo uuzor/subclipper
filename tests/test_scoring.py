@@ -14,8 +14,7 @@ def _transcript(segments: list[tuple[float, float, str, str]]) -> TranscriptResu
         text=" ".join(text for _, _, text, _ in segments),
         provider="unit",
         segments=[
-            TranscriptSegment(start, end, text, speaker)
-            for start, end, text, speaker in segments
+            TranscriptSegment(start, end, text, speaker) for start, end, text, speaker in segments
         ],
     )
 
@@ -140,3 +139,123 @@ def test_duration_penalties_for_too_short_and_too_long():
     )
     assert "too_short" in {item["rule"] for item in short.breakdown["penalties"]}
     assert "too_long" in {item["rule"] for item in long.breakdown["penalties"]}
+
+
+# --- regression tests for feature extraction ----------------------------------
+#
+# These pin the *inputs* the component functions depend on. They previously read
+# fields that had not been assigned yet (speaker_changes, filler_ratio,
+# question_opening), so the dialogue, cleanliness and question-bonus terms were
+# silently dead for every clip.
+
+
+def test_speaker_changes_feed_the_storytelling_component():
+    """A back-and-forth exchange must score higher on storytelling than a monologue."""
+    dialogue = _transcript(
+        [
+            (0.0, 5.0, "Then what happened next?", "S1"),
+            (5.0, 10.0, "The investors finally agreed with him.", "S2"),
+        ]
+    )
+    monologue = _transcript(
+        [
+            (0.0, 5.0, "Then what happened next?", "S1"),
+            (5.0, 10.0, "The investors finally agreed with him.", "S1"),
+        ]
+    )
+    scorer = ViralScorer()
+    with_dialogue = scorer.score_window(dialogue, VisualAnalysis(), [], 0.0, 10.0)
+    without = scorer.score_window(monologue, VisualAnalysis(), [], 0.0, 10.0)
+    assert with_dialogue.features.speaker_changes == 1
+    assert without.features.speaker_changes == 0
+    assert with_dialogue.components["storytelling"] > without.components["storytelling"], (
+        "speaker changes must influence storytelling"
+    )
+
+
+def test_question_opening_bonus_reaches_standalone_context():
+    scorer = ViralScorer()
+    question = scorer.score_window(
+        _transcript([(0.0, 10.0, "What actually predicts success?", "S1")]),
+        VisualAnalysis(),
+        [],
+        0.0,
+        10.0,
+    )
+    statement = scorer.score_window(
+        _transcript([(0.0, 10.0, "Something predicts success here.", "S1")]),
+        VisualAnalysis(),
+        [],
+        0.0,
+        10.0,
+    )
+    assert question.features.question_opening is True
+    assert question.components["standalone_context"] > statement.components["standalone_context"], (
+        "a question opening plus complete sentence must earn the bonus"
+    )
+
+
+def test_ordinary_words_are_not_treated_as_filler():
+    """`of`, `you` and `know` are ordinary English, not verbal tics."""
+    scorer = ViralScorer()
+    fluent = scorer.score_window(
+        _transcript(
+            [(0.0, 12.0, "The best part of the story is that most of you know the answer.", "S1")]
+        ),
+        VisualAnalysis(),
+        [],
+        0.0,
+        12.0,
+    )
+    assert fluent.features.filler_ratio == pytest.approx(0.0)
+    assert "excessive_filler" not in {item["rule"] for item in fluent.breakdown["penalties"]}
+
+
+def test_real_filler_is_still_detected_including_phrases():
+    scorer = ViralScorer()
+    filler_heavy = scorer.score_window(
+        _transcript([(0.0, 12.0, "Um, you know, like, basically it was sort of fine.", "S1")]),
+        VisualAnalysis(),
+        [],
+        0.0,
+        12.0,
+    )
+    assert filler_heavy.features.filler_ratio > 0.3
+    assert "excessive_filler" in {item["rule"] for item in filler_heavy.breakdown["penalties"]}
+
+
+def test_filler_phrase_counts_once_not_word_by_word():
+    """`you know` is one tic (2 words), not three separate hits."""
+    from quickreel.analysis.features import _filler_ratio
+
+    # "um" (1) + "you know" (2) = 3 of 6 words.
+    assert _filler_ratio("um, you know, it was fine", 6) == pytest.approx(0.5)
+
+
+def test_mid_sentence_you_know_is_not_filler():
+    """The same words in ordinary syntax are not a discourse marker."""
+    from quickreel.analysis.features import _filler_ratio
+
+    assert _filler_ratio("most of you know the answer", 6) == pytest.approx(0.0)
+
+
+def test_shareability_cleanliness_reflects_actual_filler():
+    """Clean delivery must out-score a filler-heavy one of the same length."""
+    scorer = ViralScorer()
+    clean = scorer.score_window(
+        _transcript([(0.0, 30.0, "Persistence and luck predict success far better.", "S1")]),
+        VisualAnalysis(),
+        [],
+        0.0,
+        30.0,
+    )
+    messy = scorer.score_window(
+        _transcript([(0.0, 30.0, "Um, like, you know, basically sort of whatever.", "S1")]),
+        VisualAnalysis(),
+        [],
+        0.0,
+        30.0,
+    )
+    assert clean.components["shareability"] > messy.components["shareability"], (
+        "cleanliness must be a live input to shareability"
+    )

@@ -48,6 +48,20 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
+    # Long-form sources are processed in windows rather than one giant request.
+    llm_timeout_seconds: int = 120
+    llm_max_retries: int = 3
+    # Characters of transcript sent per moment-detection call.
+    llm_chunk_chars: int = 12000
+    # Overlap between consecutive transcript windows, so a moment that straddles
+    # a boundary is still seen whole by at least one call.
+    llm_chunk_overlap_seconds: float = 30.0
+
+    # Vision. The whole video is never uploaded; frames are sampled instead.
+    vision_timeout_seconds: int = 300
+    vision_max_frames: int = 24
+    vision_frame_interval_seconds: float = 30.0
+    vision_scene_threshold: float = 0.3
 
     # Rendering
     ffmpeg_bin: str = "ffmpeg"
@@ -108,9 +122,7 @@ class Settings(BaseSettings):
 
     @property
     def allowed_source_host_list(self) -> tuple[str, ...]:
-        return tuple(
-            part.strip() for part in self.allowed_source_hosts.split(",") if part.strip()
-        )
+        return tuple(part.strip() for part in self.allowed_source_hosts.split(",") if part.strip())
 
     def ensure_directories(self) -> None:
         for directory in (

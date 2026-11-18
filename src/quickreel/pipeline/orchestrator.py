@@ -56,16 +56,15 @@ class Pipeline:
         try:
             asset = self.ingest(project)
             stage = "transcribing"
-            transcript_result = self.transcribe(project, asset)
+            audio_path = self.extract_audio(asset)
+            transcript_result = self.transcribe(project, asset, audio_path)
             stage = "analyzing"
-            audio_events = self.analyze_audio(asset)
+            audio_events = self.analyze_audio(audio_path)
             visual = self.analyze_visual(asset, transcript_result)
             self.detect_moments(project, asset, transcript_result, visual, audio_events)
             self._set_status(project, ProjectStatus.ready)
         except Exception as exc:  # noqa: BLE001 - recorded on the project row
-            logger.error(
-                "pipeline.failed", project_id=project_id, stage=stage, error=str(exc)
-            )
+            logger.error("pipeline.failed", project_id=project_id, stage=stage, error=str(exc))
             project.error = str(exc)
             self._set_status(project, self._failure_status(stage))
             raise
@@ -82,17 +81,13 @@ class Pipeline:
 
     def ingest(self, project: Project) -> MediaAsset:
         self._set_status(project, ProjectStatus.ingesting)
-        asset = self.session.scalar(
-            select(MediaAsset).where(MediaAsset.project_id == project.id)
-        )
+        asset = self.session.scalar(select(MediaAsset).where(MediaAsset.project_id == project.id))
         if asset is None:
             raise PipelineError("project has no media asset to ingest")
 
         # A URL project has no local file yet; fetch it now so that every later
         # stage only ever deals with a local path.
-        if project.source_kind == "url" and (
-            not asset.path or not Path(asset.path).exists()
-        ):
+        if project.source_kind == "url" and (not asset.path or not Path(asset.path).exists()):
             self._download_remote(project, asset)
 
         if not asset.path or not Path(asset.path).exists():
@@ -171,14 +166,21 @@ class Pipeline:
             extractor=result.info.extractor,
         )
 
-    def transcribe(self, project: Project, asset: MediaAsset) -> TranscriptResult:
-        self._set_status(project, ProjectStatus.transcribing)
-        audio_path = self.settings.artifacts_dir / f"{project.id}.wav"
+    def extract_audio(self, asset: MediaAsset) -> Path:
+        """Extract the mono WAV once and hand it to every consumer.
+
+        Previously transcription and audio analysis each derived the artifact
+        path independently and could disagree about where it lived.
+        """
         if not asset.has_audio:
             raise PipelineError("source media has no audio track to transcribe")
+        audio_path = self.settings.artifacts_dir / f"{asset.project_id}.wav"
         if not audio_path.exists():
             ffmpeg.extract_audio(asset.path, audio_path)
+        return audio_path
 
+    def transcribe(self, project: Project, asset: MediaAsset, audio_path: Path) -> TranscriptResult:
+        self._set_status(project, ProjectStatus.transcribing)
         provider = get_transcription_provider()
         result = provider.transcribe(audio_path)
 
@@ -204,20 +206,13 @@ class Pipeline:
         )
         return result
 
-    def analyze_audio(self, asset: MediaAsset) -> list[AudioEvent]:
-        audio_path = self.settings.artifacts_dir / f"{Path(asset.path).stem}.wav"
-        project_audio = self.settings.artifacts_dir / f"{asset.project_id}.wav"
-        target = project_audio if project_audio.exists() else audio_path
-        if not target.exists():
-            target = ffmpeg.extract_audio(asset.path, project_audio)
+    def analyze_audio(self, audio_path: Path) -> list[AudioEvent]:
         analyzer = get_audio_analyzer()
-        events = analyzer.analyze(target)
+        events = analyzer.analyze(audio_path)
         logger.info("audio.analyzed", events=len(events), provider=analyzer.name)
         return events
 
-    def analyze_visual(
-        self, asset: MediaAsset, transcript: TranscriptResult
-    ) -> VisualAnalysis:
+    def analyze_visual(self, asset: MediaAsset, transcript: TranscriptResult) -> VisualAnalysis:
         provider = get_vision_provider()
         return provider.analyze(Path(asset.path), transcript)
 
@@ -242,10 +237,11 @@ class Pipeline:
             media_duration=asset.duration_seconds or None,
         )
 
-        # Replace any previous candidate set so re-runs are idempotent.
-        for existing in self.session.scalars(
-            select(Clip).where(Clip.project_id == project.id)
-        ):
+        # Replace any previous candidate set so re-runs are idempotent. Delete the
+        # rendered files too, otherwise every re-run orphans the previous MP4s.
+        for existing in self.session.scalars(select(Clip).where(Clip.project_id == project.id)):
+            if existing.render_path:
+                Path(existing.render_path).unlink(missing_ok=True)
             self.session.delete(existing)
         self.session.flush()
 

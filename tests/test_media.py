@@ -65,3 +65,22 @@ def test_render_vertical_clip_burns_captions(sample_video, tmp_path):
     )
     assert target.exists()
     assert ffmpeg.probe(target).height == 1920
+
+
+def test_extract_frames_samples_and_caps(sample_video, tmp_path):
+    frames = ffmpeg.extract_frames(
+        sample_video,
+        tmp_path / "frames",
+        interval_seconds=5.0,
+        max_frames=3,
+    )
+    # 20s clip at one frame per 5s would be 4; the cap must win.
+    assert len(frames) == 3
+    assert all(frame.exists() for frame in frames)
+    assert frames == sorted(frames)
+
+
+def test_detect_scenes_returns_sorted_times(sample_video):
+    scenes = ffmpeg.detect_scenes(sample_video, threshold=0.1)
+    assert scenes == sorted(scenes)
+    assert all(isinstance(time, float) for time in scenes)

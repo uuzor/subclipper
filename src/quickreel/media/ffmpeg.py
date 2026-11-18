@@ -75,9 +75,7 @@ def require_binaries() -> None:
     settings = get_settings()
     for binary in (settings.ffmpeg_bin, settings.ffprobe_bin):
         if shutil.which(binary) is None:
-            raise FFmpegError(
-                f"required binary '{binary}' not found on PATH. Install ffmpeg."
-            )
+            raise FFmpegError(f"required binary '{binary}' not found on PATH. Install ffmpeg.")
 
 
 def probe(path: str | Path) -> MediaInfo:
@@ -190,6 +188,77 @@ def detect_silences(
     return silences
 
 
+def extract_frames(
+    source: str | Path,
+    target_dir: str | Path,
+    *,
+    interval_seconds: float = 30.0,
+    max_frames: int = 24,
+    width: int = 480,
+) -> list[Path]:
+    """Sample evenly spaced frames from ``source`` for a vision model.
+
+    The whole video is never uploaded: a 2-hour podcast is gigabytes, so frames
+    are downscaled and capped at ``max_frames``. Returns paths in time order.
+    """
+    settings = get_settings()
+    target_dir = Path(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    pattern = str(target_dir / "frame_%04d.jpg")
+    _run(
+        [
+            settings.ffmpeg_bin,
+            "-y",
+            "-i",
+            str(source),
+            "-vf",
+            f"fps=1/{max(interval_seconds, 0.1)},scale={width}:-2",
+            "-frames:v",
+            str(max_frames),
+            "-q:v",
+            "4",
+            pattern,
+        ],
+        timeout=settings.render_timeout_seconds,
+    )
+    return sorted(target_dir.glob("frame_*.jpg"))
+
+
+def detect_scenes(source: str | Path, threshold: float = 0.3) -> list[float]:
+    """Return cut timestamps using ffmpeg's scene-change score.
+
+    This replaces an earlier librosa-based silence heuristic for visuals and
+    needs no Python CV dependency.
+    """
+    settings = get_settings()
+    result = subprocess.run(
+        [
+            settings.ffmpeg_bin,
+            "-i",
+            str(source),
+            "-filter:v",
+            f"select='gt(scene,{threshold})',showinfo",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=settings.render_timeout_seconds,
+    )
+    scenes: list[float] = []
+    for line in (result.stderr or "").splitlines():
+        marker = "pts_time:"
+        if marker not in line:
+            continue
+        try:
+            value = line.split(marker, 1)[1].split()[0]
+            scenes.append(float(value))
+        except (IndexError, ValueError):
+            continue
+    return scenes
+
+
 def render_vertical_clip(
     source: str | Path,
     target: str | Path,
@@ -238,6 +307,70 @@ def render_vertical_clip(
     ]
     if audio_filters:
         cmd += ["-af", audio_filters]
+    cmd += [
+        "-vf",
+        ",".join(filters),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        str(target),
+    ]
+    _run(cmd, timeout=settings.render_timeout_seconds)
+    return target
+
+
+def render_horizontal_clip(
+    source: str | Path,
+    target: str | Path,
+    start: float,
+    end: float,
+    *,
+    burn_captions: bool = False,
+    subtitle_path: str | Path | None = None,
+    normalize_audio: bool = True,
+) -> Path:
+    """Cut ``[start, end]`` keeping the source aspect ratio, capped at 1080p.
+
+    Used when a caller asks for a non-vertical export (``vertical=false``).
+    """
+    settings = get_settings()
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    duration = max(0.1, end - start)
+
+    filters = [
+        "scale=1920:1080:force_original_aspect_ratio=decrease",
+        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
+        "setsar=1",
+    ]
+    if burn_captions and subtitle_path:
+        escaped = str(subtitle_path).replace("\\", "\\\\").replace(":", r"\:").replace("'", r"\'")
+        filters.append(f"subtitles='{escaped}'")
+
+    cmd = [
+        settings.ffmpeg_bin,
+        "-y",
+        "-ss",
+        f"{start:.3f}",
+        "-t",
+        f"{duration:.3f}",
+        "-i",
+        str(source),
+    ]
+    if normalize_audio:
+        cmd += ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]
     cmd += [
         "-vf",
         ",".join(filters),

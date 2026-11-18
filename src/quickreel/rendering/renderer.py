@@ -78,8 +78,9 @@ def render_clip(
         subtitle_path = build_srt(clip, project)
 
     output = settings.renders_dir / f"{clip.id}.mp4"
+    renderer = ffmpeg.render_vertical_clip if vertical else ffmpeg.render_horizontal_clip
     try:
-        ffmpeg.render_vertical_clip(
+        renderer(
             project.media.path,
             output,
             clip.start_seconds,
@@ -97,8 +98,9 @@ def render_clip(
     clip.render_path = str(output)
     clip.status = ClipStatus.rendered
     clip.render_meta = {
-        "width": 1080 if vertical else None,
-        "height": 1920 if vertical else None,
+        "orientation": "vertical" if vertical else "horizontal",
+        "width": 1080 if vertical else 1920,
+        "height": 1920 if vertical else 1080,
         "captions_burned": burn_captions,
         "subtitle_path": str(subtitle_path) if subtitle_path else None,
         "size_bytes": output.stat().st_size if output.exists() else 0,
@@ -108,8 +110,10 @@ def render_clip(
     return clip
 
 
-def render_clip_by_id(session: Session, clip_id: str, *, burn_captions: bool = True) -> Clip:
+def render_clip_by_id(
+    session: Session, clip_id: str, *, burn_captions: bool = True, vertical: bool = True
+) -> Clip:
     clip = session.get(Clip, clip_id)
     if clip is None:
         raise RuntimeError(f"clip {clip_id} not found")
-    return render_clip(session, clip, burn_captions=burn_captions)
+    return render_clip(session, clip, burn_captions=burn_captions, vertical=vertical)

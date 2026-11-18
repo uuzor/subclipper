@@ -40,9 +40,7 @@ def _validate_url(raw_url: str) -> str:
             detail="URL ingestion is disabled on this server",
         )
     try:
-        validated = validate_source_url(
-            raw_url, allowed_hosts=settings.allowed_source_host_list
-        )
+        validated = validate_source_url(raw_url, allowed_hosts=settings.allowed_source_host_list)
     except BlockedSourceUrl as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except SourceUrlError as exc:

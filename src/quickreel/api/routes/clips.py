@@ -80,7 +80,12 @@ def render_project_clips(
     rendered: list[ClipOut] = []
     for clip in clips:
         try:
-            render_clip(db, clip, burn_captions=payload.burn_captions)
+            render_clip(
+                db,
+                clip,
+                burn_captions=payload.burn_captions,
+                vertical=payload.vertical,
+            )
         except Exception as exc:  # noqa: BLE001 - report per-clip failure
             logger.error("render.endpoint_failed", clip_id=clip.id, error=str(exc))
             raise HTTPException(

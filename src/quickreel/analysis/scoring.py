@@ -145,9 +145,7 @@ class ViralScorer:
         if features.starts_mid_sentence:
             penalties.append(("starts_mid_sentence", *rules["starts_mid_sentence"]))
         if not features.ends_on_complete_sentence:
-            penalties.append(
-                ("ends_on_incomplete_sentence", *rules["ends_on_incomplete_sentence"])
-            )
+            penalties.append(("ends_on_incomplete_sentence", *rules["ends_on_incomplete_sentence"]))
         if features.duration_seconds < _MIN_DURATION:
             penalties.append(("too_short", *rules["too_short"]))
         elif features.duration_seconds > _MAX_DURATION:

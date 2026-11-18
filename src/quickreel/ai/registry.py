@@ -88,9 +88,7 @@ def get_vision_provider() -> VisionProvider:
 
     if settings.vision_provider == "gemini":
         return GeminiVisionProvider()
-    return _auto_with_runtime_fallback(
-        "vision", GeminiVisionProvider, fakes.FakeVisionProvider
-    )
+    return _auto_with_runtime_fallback("vision", GeminiVisionProvider, fakes.FakeVisionProvider)
 
 
 def get_moment_provider() -> MomentProvider:

@@ -139,8 +139,7 @@ def validate_source_url(
 
     if allowed_hosts and not _host_matches_allowlist(host_lower, allowed_hosts):
         raise BlockedSourceUrl(
-            f"host {host!r} is not in the configured allowlist "
-            "(QUICKREEL_ALLOWED_SOURCE_HOSTS)"
+            f"host {host!r} is not in the configured allowlist (QUICKREEL_ALLOWED_SOURCE_HOSTS)"
         )
 
     resolved: tuple[str, ...] = ()
@@ -154,9 +153,7 @@ def validate_source_url(
     if literal is not None:
         if not _is_global_address(literal):
             logger.warning("source_url.blocked_ip", host=host_lower, ip=str(literal))
-            raise BlockedSourceUrl(
-                f"host {host!r} is a non-public address ({literal})"
-            )
+            raise BlockedSourceUrl(f"host {host!r} is a non-public address ({literal})")
         resolved = (str(literal),)
     elif resolve_dns:
         resolved = _resolve(host_lower)

@@ -69,9 +69,7 @@ class Project(Base):
     transcript: Mapped[Transcript | None] = relationship(
         back_populates="project", uselist=False, cascade="all, delete-orphan"
     )
-    clips: Mapped[list[Clip]] = relationship(
-        back_populates="project", cascade="all, delete-orphan"
-    )
+    clips: Mapped[list[Clip]] = relationship(back_populates="project", cascade="all, delete-orphan")
 
 
 class MediaAsset(Base):
