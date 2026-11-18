@@ -124,7 +124,7 @@ export default function Accounts() {
   }
 
   return (
-    <div className="accounts">
+    <div className="shell accounts">
       <header className="accounts-head">
         <p className="eyebrow mono">Connected accounts</p>
         <h1>Publish destinations</h1>

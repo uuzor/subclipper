@@ -85,7 +85,7 @@ export default function Channels() {
   }
 
   return (
-    <div className="channels">
+    <div className="shell channels">
       <header className="channels-head">
         <p className="eyebrow mono">Automatic ingestion</p>
         <h1>Watched channels</h1>
