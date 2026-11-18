@@ -105,6 +105,170 @@ ffmpeg -y -f lavfi -i "color=c=navy:s=1280x720:d=20" -i /tmp/speech.wav \
 Then upload and process through the API. The first run downloads the Whisper
 model from Hugging Face, so it needs network access.
 
+## Frontend
+
+`frontend/` is a Vite + React + TypeScript app served on port 5173. It proxies
+`/api` to the backend on port 12000, so run both (`make run` plus
+`npm run dev` in `frontend/`). Build with `npm run build` (`tsc -b && vite build`);
+this must pass cleanly - `tsc` fails the build on any type error.
+
+The visual world is "The Cutting Room": paper (`#e9e7e1`) for planning
+surfaces, screen (`#0b0c0d`) for the timeline, cobalt (`#1b3ae8`) as the only
+accent. Tokens live in `src/styles/tokens.css`; keep new UI on those tokens
+rather than inventing colours.
+
+`src/lib/types.ts` mirrors `quickreel.schemas`. When a response field changes on
+the backend, update that file in the same change or the build breaks.
+
+### Serving the built UI from the API
+
+`QUICKREEL_FRONTEND_DIR` (default empty) makes the FastAPI process also serve the
+Vite build, so the whole app runs on one origin with no proxy or CORS. `make
+serve` builds `frontend/dist` and starts uvicorn with that variable set on
+`0.0.0.0:12000`. `_mount_frontend` in `main.py` mounts `/assets` and a catch-all
+`_SpaStaticFiles` at `/` that falls back to `index.html`, so client-side routes
+survive a refresh. Routers are registered before the mount, so `/api` and
+`/healthz` still win; an unknown API path returns the JSON 404, not the shell.
+
+Two deployment traps this handles: the container's port forward only reaches the
+process if uvicorn binds `0.0.0.0` (binding `127.0.0.1` yields a 502 from the
+public URL), and a configured-but-unbuilt `frontend_dir` logs a warning instead
+of crashing the server.
+
+## Response schemas must tolerate legacy rows and derive missing fields
+
+`ClipOut` and `ProjectOut` read ORM rows via `from_attributes`. Two traps:
+
+- A JSON column with `default=dict` only defaults on *insert*. Rows written
+  before the column existed read back `None`, and a bare `dict` field then raises
+  a `ResponseValidationError` (a 500 from the endpoint). Coerce `None -> {}` in a
+  `mode="before"` validator. Covered by `tests/test_schemas.py`.
+- `Clip` has no `duration_seconds` column, but `ClipOut` exposes one. Without a
+  `model_validator` deriving it from `end_seconds - start_seconds`, every clip
+  reports `0.0` and the UI shows "0s". Derive it; do not add a stored column
+  unless you also add it to the model and the missing-column helper handles it.
+
+## Publishing and the post scheduler
+
+`src/quickreel/publishing/` owns everything about getting a rendered clip onto a
+platform. The split exists so adding a platform is additive:
+
+- `base.py` — the `PlatformAdapter` protocol (`publish`, `check_status`,
+  `fetch_metrics`) and the error vocabulary. **Error classification is part of
+  the contract**: the scheduler decides whether to retry from the exception
+  type, so an adapter that reports a permanent rejection as transient makes the
+  system hammer a platform that already said no.
+- `registry.py` — resolves a platform name to an adapter. `QUICKREEL_PUBLISHING_MODE=mock`
+  returns the deterministic mock for any platform; `live` requires a registered
+  real adapter and raises rather than falling back, because a publish that
+  quietly went to a mock in production is worse than a loud failure.
+- `mocks.py` — deterministic adapter with injectable failures (`fail_times`,
+  `failure=transient|rate_limit|permanent|auth`) so every retry branch is
+  testable offline.
+- `scheduler.py` — claims due posts and drives retries.
+- `platforms.py` — where real adapters register themselves. Empty today.
+
+Two invariants in `scheduler.py` matter and should not be relaxed:
+
+1. **A post is never published twice.** `_claim` is a conditional UPDATE
+   (`scheduled`/`failed` -> `publishing`) whose `rowcount` is checked, so two
+   workers racing for the same post produce exactly one publish. A "select then
+   update" would let both win.
+2. **A failure is never retried blindly.** `TransientError`/`RateLimitError`
+   reschedule with backoff; `PermanentError`/`AuthError` are terminal. A
+   terminal failure clears `next_attempt_at`, otherwise the post stays in the
+   "due when the backoff elapses" set forever. `AuthError` also flips the target
+   to `needs_reauth` so the UI can ask for a reconnect.
+
+A platform-supplied `retry_after_seconds` always wins over the computed backoff:
+that value is the platform saying exactly when it will accept a request again.
+
+## External triggers: ingest without a human pasting a URL
+
+`src/quickreel/triggers/` is the "a new video exists, go process it" path. It is
+deliberately separate from `pipeline/` (which assumes a project exists) and
+`api/` (which is transport). The mechanism is WebSub (PubSubHubbub): we ask a
+hub to watch a channel, the hub POSTs to our callback when it publishes, and we
+create a project for review.
+
+- `base.py` — the `HubClient` protocol and the failure vocabulary
+  (`TransientHubError` vs `PermanentHubError`). Same reasoning as publishing: a
+  4xx to a subscribe call will keep being a 4xx, so retrying hides the problem.
+- `feed.py` — parses the untrusted notification body. Uses `defusedxml` when
+  present (entity-expansion and XXE defence), caps the body size, and
+  **shape-checks the video and channel ids** before they reach a URL. A video id
+  is never interpolated into a URL without passing `^[A-Za-z0-9_-]{11}$`.
+- `hub.py` — `MockHubClient` and `HttpHubClient`, plus `default_hub_client()`,
+  which follows `effective_publishing_mode` so there is one notion of live/mock
+  in the app rather than two that can disagree.
+- `youtube.py` — subscription lookup, ingest policy, idempotency.
+- `service.py` — create / renew / revoke subscription lifecycle.
+
+Invariants worth keeping:
+
+1. **The callback is public and unsigned.** Its defences are a shared secret in
+   the path (`QUICKREEL_YOUTUBE_CALLBACK_SECRET`, required in production), an
+   optional `X-Hub-Signature` HMAC, and a subscription allowlist. A notification
+   for a channel we did not subscribe to is ignored, so a leaked secret does not
+   cause processing of arbitrary channels.
+2. **Always answer 2xx to a received notification.** The hub cannot fix a
+   malformed body by retrying, and a 4xx makes it mark the subscription
+   unhealthy. Parse failures return 204 and are logged; the event log records
+   what happened.
+3. **Idempotency is a unique constraint, not a lookup.** WebSub permits duplicate
+   delivery. `(channel_id, video_id)` is unique on `youtube_events`; the lookup
+   in `handle_notification` is the fast path and the `IntegrityError` catch is
+   the real guard against two concurrent deliveries.
+4. **A new video is a draft by default.** `QUICKREEL_YOUTUBE_AUTO_SCHEDULE=false`
+   means a notification creates a project for review. Auto-processing an
+   unattended channel spends money, so it is opt-in per subscription.
+5. **Leases are renewed before they lapse.** A WebSub lease expires silently: the
+   hub just stops calling. `renew_due_subscriptions` runs from a Celery beat
+   task and renews within `QUICKREEL_YOUTUBE_RENEW_BEFORE_SECONDS` of expiry.
+
+The callback is `POST /api/v1/triggers/youtube/notify[/{secret}]`, and
+verification is the matching GET (it echoes `hub.challenge`). Subscription
+management is under `/api/v1/triggers/youtube/subscriptions`.
+
+## App-review materials live in docs/app-review/
+
+`docs/app-review/` holds the TikTok, Meta/Instagram, and Google/YouTube
+application text, the shared demo script, and the scope justifications. The rule
+for editing them: **do not claim a capability the code does not have.** The scope
+lists in `oauth.py` are the source of truth; each document justifies exactly
+those and nothing more. When a scope changes in `oauth.py`, update the matching
+table in `docs/app-review/README.md` in the same change, or the form and the code
+disagree and the review bounces.
+
+## Timestamps must be timezone-aware
+
+`UTCDateTime` in `models.py` is used for every timestamp column. SQLite discards
+`tzinfo` on write and returns naive datetimes, so comparing a loaded value
+against `datetime.now(UTC)` raises `TypeError: can't compare offset-naive and
+offset-aware datetimes`. Postgres with `timezone=True` returns aware values, so
+the two backends disagree. The decorator normalises both directions. Use it
+rather than a bare `DateTime(timezone=True)` for any new timestamp column.
+
+## Platform APIs: publish is open, ingest is closed
+
+Worth knowing before designing around these, because the asymmetry is deliberate:
+
+- **TikTok** Content Posting API supports direct post and scheduling, but
+  **unaudited clients can only post privately** until the app passes TikTok's
+  audit. URL-based posting requires a **verified domain**. Both are app-review
+  gates, not code problems.
+- **Meta** Reels publishing requires a Business/Creator account plus app review.
+- **YouTube** has no download endpoint at all, and its API Services Terms grant
+  no licence to reproduce or distribute audiovisual content outside the API
+  Services. That is why datacenter IPs get 403 on media while metadata succeeds
+  (see the YouTube ingestion section above).
+
+The product consequence: ingest is upload-first (creator's own material), and
+trend signals from official APIs are aimed at the creator's own back catalogue
+rather than at third-party videos. Provenance (`license_note`, `authorized_by`
+on `Project`) is recorded so a clip can always answer on what basis it may be
+republished.
+
 ## Database schema changes
 
 There is no migration framework. `Base.metadata.create_all` never alters an

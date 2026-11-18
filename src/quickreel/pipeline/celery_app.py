@@ -30,4 +30,19 @@ celery_app.conf.update(
     task_track_started=True,
     worker_max_tasks_per_child=50,
     broker_connection_retry_on_startup=True,
+    # The scheduler is a sweep, not an event queue: every minute it publishes
+    # whatever is due. ``run_due_posts`` claims each post atomically, so a slow
+    # sweep overlapping the next one cannot double-post.
+    beat_schedule={
+        "publish-due-posts": {
+            "task": "quickreel.run_due_posts",
+            "schedule": 60.0,
+        },
+        # Hourly, not every minute: a WebSub lease is days long, and the renewal
+        # itself is a network call to the hub.
+        "renew-youtube-subscriptions": {
+            "task": "quickreel.renew_youtube_subscriptions",
+            "schedule": 3600.0,
+        },
+    },
 )

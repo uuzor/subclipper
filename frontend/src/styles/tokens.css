@@ -1,0 +1,70 @@
+/* QuickReel — design tokens
+   World: "The Cutting Room" — plan on paper, screen in the dark.
+   One committed colour (cobalt, the editor's grease pencil) carries whole
+   fields; crimson is reserved for the marks that mean "moment detected". */
+
+:root {
+  /* Paper ground — cool newsprint, not cream */
+  --paper: #e9e7e1;
+  --paper-raised: #f4f2ed;
+  --paper-sunken: #dedbd3;
+
+  /* Ink */
+  --ink: #16181a;
+  --ink-soft: #4b4f53;
+  --ink-faint: #83878a;
+  --ink-ghost: #b3b2ac;
+
+  /* Rules and hairlines */
+  --rule: rgba(22, 24, 26, 0.13);
+  --rule-strong: rgba(22, 24, 26, 0.24);
+
+  /* Committed colour: the grease pencil */
+  --cobalt: #1b3ae8;
+  --cobalt-deep: #0f27a8;
+  --cobalt-wash: rgba(27, 58, 232, 0.1);
+  --cobalt-ink: #0b1c6b;
+
+  /* Signal: detected moment */
+  --crimson: #d92c15;
+  --crimson-wash: rgba(217, 44, 21, 0.12);
+
+  /* Screening surface (dark, for watching) */
+  --screen: #0b0c0d;
+  --screen-raised: #17191b;
+  --screen-line: rgba(255, 255, 255, 0.12);
+  --screen-text: #eceae4;
+  --screen-faint: rgba(236, 234, 228, 0.55);
+
+  /* Type */
+  --font-display: "Archivo", "Helvetica Neue", sans-serif;
+  --font-body: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  /* Space — 4px base */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+  --s8: 64px;
+  --s9: 96px;
+  --s10: 128px;
+
+  /* Radii — modest; this is a tool, not a toy */
+  --r-sm: 4px;
+  --r-md: 8px;
+  --r-lg: 14px;
+
+  /* Elevation: offset + blur, warm-tinted ink */
+  --lift-1: 0 1px 2px rgba(22, 24, 26, 0.08), 0 2px 8px rgba(22, 24, 26, 0.06);
+  --lift-2: 0 2px 4px rgba(22, 24, 26, 0.09), 0 12px 32px rgba(22, 24, 26, 0.12);
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+  --measure: 68ch;
+  --shell: 1240px;
+}

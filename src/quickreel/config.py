@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     data_dir: Path = Path("./data")
     database_url: str = "sqlite+pysqlite:///./data/quickreel.db"
     cors_origins: str = "http://localhost:3000"
+
+    # Built frontend to serve from this same process. Empty disables static
+    # serving (pure API mode, e.g. the test suite). Set to the Vite output
+    # directory to run the whole app on one origin, which is what the
+    # deployment does so no proxy or CORS config is needed.
+    frontend_dir: Path | None = None
 
     # Queue
     redis_url: str = ""
@@ -88,6 +94,63 @@ class Settings(BaseSettings):
     downloader_cookies_file: str = ""
     downloader_proxy: str = ""
 
+    # Publishing / scheduling. ``mock`` resolves every platform to the
+    # deterministic mock adapter so the scheduling loop runs offline; ``live``
+    # requires a registered real adapter and never falls back silently.
+    #
+    # Empty means "decide from the environment": mock outside production, live
+    # inside it. That default matters, because the failure mode of getting it
+    # wrong in production is publishing through a stub that reports success
+    # while nothing reaches the platform.
+    publishing_mode: str = ""
+    publish_max_attempts: int = 5
+    publish_retry_base_seconds: int = 60
+    # Ceiling on backoff, so a throttled post cannot drift days out and
+    # effectively disappear.
+    publish_max_backoff_seconds: int = 3600
+
+    # OAuth. ``public_base_url`` is the externally reachable origin, used to
+    # build redirect URIs that the platform will call back to. It must be the
+    # verified domain in production, because the platform rejects a mismatch.
+    public_base_url: str = "http://localhost:12000"
+    # Signs the OAuth ``state`` parameter. Without it an attacker can hand a
+    # victim a callback URL and silently attach the attacker's account to the
+    # victim's workspace (login CSRF), so it is required in production.
+    oauth_state_secret: str = ""
+
+    # Per-platform OAuth client credentials, issued when an app is created in
+    # the platform's developer console. Empty means the connect flow reports
+    # "not configured" rather than sending the user to an error page.
+    tiktok_client_id: str = ""
+    tiktok_client_secret: str = ""
+    instagram_reels_client_id: str = ""
+    instagram_reels_client_secret: str = ""
+    youtube_shorts_client_id: str = ""
+    youtube_shorts_client_secret: str = ""
+
+    # YouTube upload events (WebSub / PubSubHubbub). The hub pushes a
+    # notification when a subscribed channel publishes, which is the trigger
+    # for back-catalogue ingestion.
+    youtube_hub_url: str = "https://pubsubhubbub.appspot.com/subscribe"
+    # Shared secret appended to the callback URL and echoed by the hub during
+    # the verification handshake. WebSub has no HMAC of its own, so this plus a
+    # channel allowlist is what authenticates a notification.
+    youtube_callback_secret: str = ""
+    # Optional: when set, notifications must carry a matching X-Hub-Signature.
+    # Only used if the hub actually signs; PubSubHubbub does not by default.
+    youtube_signing_secret: str = ""
+    # Renew a subscription once it is within this many seconds of expiring.
+    # Leases lapse silently otherwise, and the trigger just stops firing.
+    youtube_renew_before_seconds: int = 86400
+    # Ignore videos shorter than this: there is nothing to clip out of them.
+    youtube_min_duration_seconds: int = 90
+    # Shorts are already short-form, so clipping them is not the job.
+    youtube_skip_shorts: bool = True
+    # A new video creates a draft for approval by default. Auto-processing is
+    # opt-in, because an unattended pipeline that spends money and publishes
+    # without a human is not something to switch on by default.
+    youtube_auto_schedule: bool = False
+
     # Scoring. Weights must sum to 1.0; calibrated against real engagement
     # data later (see docs/architecture.md, "Viral Intelligence").
     scoring_weights: dict[str, float] = Field(
@@ -105,6 +168,74 @@ class Settings(BaseSettings):
     @classmethod
     def _resolve_data_dir(cls, value: Path) -> Path:
         return value.expanduser()
+
+    @field_validator("publishing_mode", mode="before")
+    @classmethod
+    def _known_publishing_mode(cls, value: object) -> object:
+        """Reject a typo rather than letting it fall through to live mode."""
+        if value is None:
+            return ""
+        text = str(value).strip().lower()
+        if text and text not in {"mock", "live"}:
+            raise ValueError(f"publishing_mode must be 'mock' or 'live', got {value!r}")
+        return text
+
+    @field_validator("frontend_dir", mode="before")
+    @classmethod
+    def _empty_frontend_dir_is_none(cls, value: object) -> object:
+        """An unset env var arrives as "", which is not a valid path."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return value
+
+    @property
+    def is_production(self) -> bool:
+        return self.env.strip().lower() in {"production", "prod"}
+
+    @property
+    def effective_publishing_mode(self) -> str:
+        """The mode actually used, resolving the empty default.
+
+        An unset ``publishing_mode`` means mock locally and live in production,
+        so forgetting to set it in production fails safe rather than silently
+        publishing through a stub.
+        """
+        mode = self.publishing_mode.strip().lower()
+        if mode:
+            return mode
+        return "live" if self.is_production else "mock"
+
+    @model_validator(mode="after")
+    def _refuse_unsafe_production_config(self) -> Settings:
+        """Fail at startup rather than at the first bad publish.
+
+        Both of these are silent-wrong-behaviour bugs in production: mock mode
+        reports success while nothing reaches the platform, and a missing OAuth
+        state secret makes account-linking forgeable. Neither should be
+        discoverable by a user noticing their posts never appeared.
+        """
+        if not self.is_production:
+            return self
+
+        problems: list[str] = []
+        if self.effective_publishing_mode == "mock":
+            problems.append(
+                "QUICKREEL_PUBLISHING_MODE=mock is not allowed when QUICKREEL_ENV=production; "
+                "publishes would report success without reaching any platform"
+            )
+        if not self.oauth_state_secret.strip():
+            problems.append(
+                "QUICKREEL_OAUTH_STATE_SECRET must be set in production; "
+                "without it OAuth account-linking is not forgery-resistant"
+            )
+        if not self.youtube_callback_secret.strip():
+            problems.append(
+                "QUICKREEL_YOUTUBE_CALLBACK_SECRET must be set in production; "
+                "the WebSub callback is public and unsigned without it"
+            )
+        if problems:
+            raise ValueError("unsafe production configuration: " + "; ".join(problems))
+        return self
 
     @property
     def uploads_dir(self) -> Path:

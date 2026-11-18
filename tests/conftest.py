@@ -14,16 +14,44 @@ from pathlib import Path
 import pytest
 
 # Configure the app *before* importing it, since settings are cached.
+#
+# These are assigned, not defaulted with setdefault. A developer with
+# QUICKREEL_MOMENT_PROVIDER=llm exported in their shell would otherwise run the
+# suite against real providers, so the same commit could pass on CI and fail on
+# a laptop — or worse, pass locally while a fake-only test hid a real
+# regression. The suite owns its configuration; the shell does not get a vote.
 _TMP_ROOT = Path(__file__).parent / ".tmp"
 _TMP_ROOT.mkdir(exist_ok=True)
 
-os.environ.setdefault("QUICKREEL_ENV", "test")
-os.environ.setdefault("QUICKREEL_DATA_DIR", str(_TMP_ROOT / "data"))
-os.environ.setdefault("QUICKREEL_DATABASE_URL", f"sqlite+pysqlite:///{_TMP_ROOT}/test.db")
-os.environ.setdefault("QUICKREEL_TRANSCRIPTION_PROVIDER", "fake")
-os.environ.setdefault("QUICKREEL_VISION_PROVIDER", "fake")
-os.environ.setdefault("QUICKREEL_MOMENT_PROVIDER", "fake")
-os.environ.setdefault("QUICKREEL_TASK_ALWAYS_EAGER", "true")
+_TEST_ENV = {
+    "QUICKREEL_ENV": "test",
+    "QUICKREEL_DATA_DIR": str(_TMP_ROOT / "data"),
+    "QUICKREEL_DATABASE_URL": f"sqlite+pysqlite:///{_TMP_ROOT}/test.db",
+    "QUICKREEL_TRANSCRIPTION_PROVIDER": "fake",
+    "QUICKREEL_VISION_PROVIDER": "fake",
+    "QUICKREEL_MOMENT_PROVIDER": "fake",
+    "QUICKREEL_TASK_ALWAYS_EAGER": "true",
+    "QUICKREEL_PUBLISHING_MODE": "mock",
+    "QUICKREEL_FRONTEND_DIR": "",
+}
+os.environ.update(_TEST_ENV)
+
+# Every QUICKREEL_ variable the shell might be carrying, so a stray export
+# cannot leak into a test. Anything set above is kept.
+_SHELL_LEAKED_QUICKREEL_VARS = [
+    name for name in os.environ if name.startswith("QUICKREEL_") and name not in _TEST_ENV
+]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_settings_from_shell():
+    """Strip QUICKREEL_* the developer's shell exported for the whole session.
+
+    Done once, before any settings are built, because ``get_settings`` caches.
+    """
+    for name in _SHELL_LEAKED_QUICKREEL_VARS:
+        os.environ.pop(name, None)
+    yield
 
 
 @pytest.fixture(scope="session")

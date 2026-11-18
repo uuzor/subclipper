@@ -1,4 +1,4 @@
-.PHONY: install install-ai install-download install-all test lint fmt run worker clean
+.PHONY: install install-ai install-download install-all test lint fmt run worker serve deploy build-frontend clean
 
 install:
 	python3 -m venv .venv
@@ -25,6 +25,23 @@ fmt:
 
 run:
 	.venv/bin/uvicorn quickreel.main:app --reload --port 12000
+
+build-frontend:
+	cd frontend && npm ci && npm run build
+
+# Serve the API and the built frontend from one process on one origin.
+# Binds 0.0.0.0 so a container's port forward (not just localhost) can reach it.
+serve: build-frontend
+	QUICKREEL_FRONTEND_DIR=$(CURDIR)/frontend/dist \
+		.venv/bin/uvicorn quickreel.main:app --host 0.0.0.0 --port 12000
+
+# Same as `serve`, but for a host that forwards a port to a public URL. Pass
+# PUBLIC_BASE_URL (and PORT if it is not 12000) so OAuth redirects and the
+# WebSub callback address the public origin rather than localhost.
+deploy: build-frontend
+	QUICKREEL_FRONTEND_DIR=$(CURDIR)/frontend/dist \
+	QUICKREEL_PUBLIC_BASE_URL=$(PUBLIC_BASE_URL) \
+		.venv/bin/uvicorn quickreel.main:app --host 0.0.0.0 --port $(or $(PORT),12000)
 
 worker:
 	.venv/bin/celery -A quickreel.pipeline.celery_app:celery_app worker -l info

@@ -76,7 +76,12 @@ def _attach_url_source(db: Session, project: Project, url: str) -> None:
 
 @router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
 def create_project(payload: ProjectCreateIn, db: Session = Depends(get_db)) -> Project:
-    project = Project(title=payload.title, source_kind="upload")
+    project = Project(
+        title=payload.title,
+        source_kind="upload",
+        license_note=payload.license_note,
+        authorized_by=payload.authorized_by,
+    )
     db.add(project)
     db.flush()
     if payload.source_url is not None:

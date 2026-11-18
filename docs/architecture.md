@@ -125,13 +125,45 @@ filter graph, so this is a local change.
 
 ### Viral Intelligence loop (Phase 7)
 
-1. Publish a clip, capture its platform id.
-2. Poll or receive views, retention, shares and comment counts.
+1. Publish a clip, capture its platform id (`ScheduledPost.external_post_id`).
+2. Poll or receive views, retention, shares and comment counts; store samples in
+   `ClipMetric`. Recording starts from the first publish rather than when the
+   loop is switched on, because the learning needs history that already exists.
 3. Store outcomes against the clip.
 4. Refit `scoring_weights` and, if useful, the penalty thresholds.
 5. Feed the new weights back through configuration.
 
 The `score_breakdown` persisted per clip is the training input.
+
+### Distribution and scheduling
+
+`src/quickreel/publishing/` publishes rendered clips to connected accounts and
+is built so a platform is a plug-in rather than a fork:
+
+```
+ScheduledPost ──> registry.get_adapter(platform) ──> PlatformAdapter.publish()
+      │                                                      │
+      └── PublishAttempt (one row per call, full retry history)
+                                                             │
+                       ClipMetric <── fetch_metrics() <──────┘
+```
+
+`PlatformAdapter` (`publishing/base.py`) has three methods: `publish`,
+`check_status`, and `fetch_metrics`. The adapter's exception type drives the
+retry policy — `TransientError`/`RateLimitError` reschedule with backoff,
+`PermanentError`/`AuthError` are terminal. Adding a platform means implementing
+the protocol and registering it in `publishing/platforms.py`; the scheduler,
+models, and HTTP routes are untouched.
+
+Scheduling is a sweep rather than a per-post timer: Celery beat calls
+`quickreel.run_due_posts` every minute, which publishes whatever is due. Each
+post is claimed with an atomic conditional update, so overlapping sweeps cannot
+double-post. Backoff is expressed as `ScheduledPost.next_attempt_at`, which keeps
+retry state in the database instead of in a queue that a restart would lose.
+
+`QUICKREEL_PUBLISHING_MODE=mock` resolves every platform to the deterministic
+mock adapter, so the whole loop is exercisable with no credentials. In `live`
+mode an unregistered platform raises instead of silently using the mock.
 
 ### Async workers and storage
 
@@ -145,11 +177,24 @@ S3-compatible backend behind the same interface for multi-node deployments.
 Project 1─1 MediaAsset      (path filled at upload, or after URL download)
 Project 1─1 Transcript      (segments JSON: start, end, text, speaker)
 Project 1─n Clip            (boundaries, score, score_breakdown, render_path)
+
+Clip        n─n ScheduledPost  (one row per clip/platform/time)
+PublishTarget 1─n ScheduledPost
+ScheduledPost 1─n PublishAttempt  (full retry history, never overwritten)
+ScheduledPost 1─n ClipMetric      (performance samples for the learning loop)
 ```
 
 `Project.source_kind` is `upload` or `url`; `Project.source_url` holds the
 validated link for URL projects. A URL project's `MediaAsset` starts with an
 empty path, which the ingest stage fills in once the download completes.
 
+`Project.license_note` and `Project.authorized_by` record provenance: on what
+basis this material may be republished. They are surfaced through the API so a
+creator or agency can see it, and so a clip can always answer the question.
+
 `Clip` keeps both the raw detector boundaries and the optimised boundaries, so
 the effect of boundary optimisation is always auditable.
+
+`PublishTarget.credentials` holds OAuth material for a connected account and is
+stored as-is today. A production deployment should encrypt it at rest; the field
+is deliberately opaque to the API layer, which never serialises it back out.

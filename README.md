@@ -24,7 +24,8 @@ mockup: the pipeline runs end to end and produces real 1080x1920 MP4 files.
 | Vertical render + captions | Done | `rendering/renderer.py` |
 | Async processing queue | Done (Celery + Redis, eager fallback) | `pipeline/` |
 | Face tracking / speaker-aware crop | Not yet | hook in `media/ffmpeg.py` |
-| Publishing to platforms | Not yet | - |
+| Publishing to platforms | Mock adapters only | `publishing/` |
+| Channel ingestion trigger (WebSub) | Done (mock hub fallback) | `triggers/` |
 | Performance analytics / Viral Intelligence loop | Not yet | - |
 
 ## Architecture
@@ -55,12 +56,28 @@ make install-download # optional: yt-dlp, for importing videos from a link
 cp .env.example .env
 make test             # real ffmpeg, no API keys needed
 make run              # http://localhost:12000/docs
+make serve            # one process: API + built frontend, http://localhost:12000
 ```
 
 The default configuration uses deterministic fake AI providers and eager task
 execution, so the whole pipeline runs locally with no credentials and no broker.
 Swap in real providers by setting `QUICKREEL_TRANSCRIPTION_PROVIDER`,
 `QUICKREEL_VISION_PROVIDER` and `QUICKREEL_MOMENT_PROVIDER`.
+
+### Deploying behind a port forward
+
+On a host that maps a local port to a public URL (a container runtime, a VM, a
+tunnel), `serve` is enough if the public origin is not needed for anything the
+app generates. When it is — OAuth redirect URIs and the WebSub callback are both
+built from `QUICKREEL_PUBLIC_BASE_URL` — use `deploy` and pass that URL:
+
+```bash
+make deploy PUBLIC_BASE_URL=https://my-app.example.com PORT=12000
+```
+
+The app builds no links from the request host, so this is the only thing that
+has to be right for a forwarded deployment. Both targets bind `0.0.0.0`, so the
+port forward reaches them.
 
 ## Using the API
 
@@ -230,6 +247,28 @@ fail with a 403 from a cloud host even though the same link works locally. In
 that case run the downloader through a residential proxy
 (`QUICKREEL_DOWNLOADER_PROXY`) or supply a cookies file.
 
+## Frontend
+
+The UI is a Vite + React + TypeScript app in `frontend/`. In development it runs
+on its own port and proxies `/api` to the backend, so no CORS setup is needed:
+
+```bash
+make run                 # terminal 1: API on http://localhost:12000
+cd frontend && npm install && npm run dev   # terminal 2: UI on http://localhost:5173
+```
+
+To run the whole app on a single origin — API and UI from one process, which is
+how it is deployed — build the UI and point the server at the output:
+
+```bash
+make serve               # builds frontend/, then serves everything on :12000
+```
+
+`make serve` sets `QUICKREEL_FRONTEND_DIR` to `frontend/dist` and binds
+`0.0.0.0:12000`. The server mounts `/assets` for hashed bundles and falls back to
+`index.html` for any other path, so client-side routes like `/projects/<id>`
+survive a hard refresh. Unknown `/api` paths still return JSON 404s.
+
 ## Development
 
 ```bash
@@ -266,7 +305,8 @@ tests/                 unit, media and end-to-end API tests
 
 ## Roadmap
 
-Phased per the brief. Phase 1-5 are implemented here.
+Phased per the brief. Phases 1-5 are implemented, plus the distribution
+foundation (scheduler, adapter interface, mocks).
 
 1. ~~Video upload and transcription~~
 2. ~~AI identification of interesting moments~~
@@ -276,6 +316,96 @@ Phased per the brief. Phase 1-5 are implemented here.
 6. Face tracking and advanced editing (MediaPipe, per-frame crop offsets)
 7. Performance analytics and the Viral Intelligence learning loop
 
+Distribution work, in build order:
+
+- ~~Scheduler, retry policy, adapter interface, mock adapters~~ (done)
+- ~~Upload and authorised-channel ingest feeding the scheduler~~ (done)
+- ~~YouTube upload-event trigger (WebSub; needs no app audit)~~ (done)
+- TikTok and YouTube Shorts adapters, then Meta once app review clears
+- Performance feedback loop, then trend-to-back-catalogue matching
+
+## Publishing and scheduling
+
+Rendered clips can be queued for publication to a connected account. The
+scheduler is deliberately platform-agnostic: a platform is an adapter
+implementing three methods, and adding one does not touch the scheduler, the
+models, or the routes.
+
+```bash
+# Connect an account (credentials are stored, never echoed back)
+curl -X POST localhost:12000/api/v1/publish-targets \
+  -H 'Content-Type: application/json' \
+  -d '{"platform": "tiktok", "display_name": "My account"}'
+
+# Queue a rendered clip
+curl -X POST localhost:12000/api/v1/scheduled-posts \
+  -H 'Content-Type: application/json' \
+  -d '{"clip_id": "...", "target_id": "...", "scheduled_for": "2026-06-01T09:00:00Z",
+       "caption": "Watch this"}'
+
+# Publish everything that is due (Celery beat does this every minute)
+curl -X POST localhost:12000/api/v1/publishing/run-due
+```
+
+Retry policy is the part worth knowing. A transient or rate-limit failure is
+rescheduled with exponential backoff, capped so a throttled post cannot drift
+days out; a platform-supplied `retry-after` always wins over the computed delay.
+A permanent rejection or an authentication failure is terminal — retrying a
+rejected video forever is how an app gets rate-limited or banned. Every adapter
+call is recorded as a `PublishAttempt`, so "it worked on the fourth try" survives
+as history rather than being overwritten by the last error.
+
+No live platform adapter ships yet. `QUICKREEL_PUBLISHING_MODE=mock` (the
+default) resolves every platform to a deterministic mock, so the whole loop runs
+and is tested without credentials. In `live` mode an unregistered platform raises
+rather than silently falling back to the mock.
+
+## Watching a channel (automatic ingestion)
+
+Pasting a link is fine for one video; watching a channel is what makes the
+product run without a person. QuickReel subscribes to a channel through the
+PubSubHubbub hub, and the hub pushes a notification when the channel publishes.
+Ingest creates a project for the new video, which then flows through the normal
+pipeline.
+
+```bash
+# Start watching a channel. Record the authorisation: it is carried onto every
+# project (and clip) this channel produces.
+curl -X POST localhost:12000/api/v1/triggers/youtube/subscriptions \
+  -H 'Content-Type: application/json' \
+  -d '{"channel_id": "UCxxxxxxxxxxxxxxxxxxxxxx", "channel_title": "My show",
+       "authorized_by": "me@example.com", "license_note": "I own this channel"}'
+
+# See what has arrived and what QuickReel did with it
+curl localhost:12000/api/v1/triggers/youtube/events
+```
+
+The callback the hub calls is
+`POST /api/v1/triggers/youtube/notify`; the matching `GET` answers the hub's
+verification handshake. Three things about the design are worth knowing:
+
+- **A new video is a draft by default.** `auto_process` is off unless you turn it
+  on, so a notification creates a project to review rather than spending money on
+  an unattended pipeline. Turn it on per subscription when the channel is trusted.
+- **The callback is public and unsigned.** It is defended by a shared secret in
+  the path (`QUICKREEL_YOUTUBE_CALLBACK_SECRET`, required in production) and by
+  the subscription allowlist: a notification for a channel we did not subscribe
+  to is ignored, so a leaked secret does not cause arbitrary processing.
+- **Duplicate delivery is normal.** WebSub permits it, so `(channel_id, video_id)`
+  is unique and a repeat delivery is a no-op.
+
+Set `QUICKREEL_PUBLISHING_MODE=mock` (the default) and the hub is simulated too:
+subscriptions are created and leases tracked in memory, with no outbound calls,
+so the whole loop runs in tests and locally. The Channels page in the UI is the
+front end for this.
+
+## App review
+
+Publishing to TikTok, Instagram Reels, and YouTube Shorts each requires an
+approved developer app. `docs/app-review/` holds the application text, the scope
+justifications, and the shared demo script. The scope lists in `oauth.py` are the
+source of truth; the documents justify exactly those and nothing more.
+
 ## Legal and ethical note
 
 Only ingest video you own or are licensed to use. QuickReel accepts links to
@@ -284,6 +414,17 @@ downloaded platform content remains subject to the platform's terms of service.
 You are responsible for having the rights to clip and republish anything you
 import.
 
+Record provenance on each project (`license_note`, `authorized_by`) so every
+clip carries the basis on which it may be republished. This is both a legal
+safeguard and a selling point for creators and agencies.
+
+Note that the platform APIs are asymmetric on purpose: **publishing is open,
+ingestion is closed.** TikTok, Meta, and YouTube all offer sanctioned ways to
+post your own content, and none offers a sanctioned way to pull someone else's
+content in. The trend features are therefore aimed at a creator's own back
+catalogue, matched against signals from official APIs, rather than at clipping
+third-party videos.
+
 ## Security notes
 
 - Upload filenames are never trusted; only a safe extension whitelist is kept.
@@ -291,6 +432,10 @@ import.
 - ffmpeg is invoked with argument lists, never shell strings.
 - No secrets are stored in code; all credentials come from the environment.
 - Error messages are sanitised before reaching the API response.
+- Platform credentials (`PublishTarget.credentials`) are never serialised back
+  out through the API. They are stored unencrypted today; encrypt them at rest
+  before running multi-tenant. Use least-privilege OAuth scopes: quickreel needs
+  permission to publish, not to read a creator's private analytics or messages.
 - Source URLs pass an SSRF guard: scheme allowlist, optional host allowlist, and
   a DNS check that refuses any non-globally-routable address. The check is
   repeated inside the pipeline, immediately before the download.
