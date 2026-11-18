@@ -149,13 +149,14 @@ class GeminiVisionProvider:
         )
 
     @staticmethod
-    def _load_frame(path: Path):
-        """Inline a sampled frame; the SDK accepts raw image bytes."""
-        try:
-            from PIL import Image  # type: ignore import-not-found
-        except ImportError:  # pragma: no cover - optional extra
-            return path.read_bytes()
-        return Image.open(path)
+    def _load_frame(path: Path) -> dict:
+        """Inline a sampled frame as a blob the SDK accepts.
+
+        The SDK rejects raw ``bytes`` and ``PIL`` is not a dependency, so build
+        the ``{"mime_type", "data"}`` dict form explicitly.
+        """
+        mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+        return {"mime_type": mime, "data": path.read_bytes()}
 
 
 class LLMMomentProvider:

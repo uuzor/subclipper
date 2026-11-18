@@ -131,3 +131,24 @@ instead. Tests assert provenance in `test_full_pipeline_produces_ranked_clips`.
 `httpx.MockTransport(handler)` to drive the real request/retry/chunking code with
 no network. `google.generativeai` is deprecated in favour of `google.genai`; the
 vision provider still uses the former, so a migration is pending.
+
+## Vision frames and the Gemini SDK
+
+`GeminiVisionProvider._load_frame` must return the SDK's blob **dict** form
+(`{"mime_type": ..., "data": ...}`). The SDK rejects raw `bytes`, and PIL is not
+a dependency, so a bare `path.read_bytes()` raises
+`TypeError: Could not create Blob` and surfaces as a 500 from the process
+endpoint. Covered by `test_gemini_load_frame_returns_sdk_blob_dict`.
+
+The default `QUICKREEL_GEMINI_MODEL` is `gemini-flash-lite-latest`. Older names
+such as `gemini-2.0-flash` and `gemini-2.5-flash` are retired and return 404 for
+new API keys; higher-tier flash models can return 503 under load.
+
+## YouTube ingestion is blocked from datacenter IPs
+
+`yt-dlp` metadata extraction works, but every media download path returns
+HTTP 403 (`unable to download video data`) or "Sign in to confirm you're not a
+bot" from cloud IPs, for every player client, including audio-only. URL
+ingestion therefore fails loudly with a 422 naming the 403 - it does not produce
+fake clips. Uploads are unaffected; local development can generate a source with
+`espeak-ng` + `ffmpeg` as in `examples/clips/README.md`.

@@ -319,3 +319,25 @@ def test_fallback_proxy_raises_when_fallback_disabled(monkeypatch):
     proxy = registry._FallbackProxy("transcription", Boom(), object())
     with pytest.raises(RuntimeError, match="api down"):
         proxy.transcribe("audio")
+
+
+def test_gemini_load_frame_returns_sdk_blob_dict(tmp_path):
+    """The Gemini SDK rejects raw ``bytes``; frames must be blob dicts.
+
+    Regression test: without PIL the old code returned ``path.read_bytes()``,
+    which raised ``TypeError: Could not create ``Blob```` inside the SDK and
+    surfaced as a 500 from the process endpoint.
+    """
+    from quickreel.ai.providers import GeminiVisionProvider
+
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"\xff\xd8\xff\xe0fake-jpeg")
+    blob = GeminiVisionProvider._load_frame(frame)
+
+    assert isinstance(blob, dict)
+    assert blob["mime_type"] == "image/jpeg"
+    assert blob["data"] == b"\xff\xd8\xff\xe0fake-jpeg"
+
+    png = tmp_path / "frame.png"
+    png.write_bytes(b"\x89PNG\r\n")
+    assert GeminiVisionProvider._load_frame(png)["mime_type"] == "image/png"
