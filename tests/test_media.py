@@ -84,3 +84,15 @@ def test_detect_scenes_returns_sorted_times(sample_video):
     scenes = ffmpeg.detect_scenes(sample_video, threshold=0.1)
     assert scenes == sorted(scenes)
     assert all(isinstance(time, float) for time in scenes)
+
+
+def test_extract_frames_clears_stale_frames_from_previous_run(sample_video, tmp_path):
+    frames_dir = tmp_path / "frames"
+    # A previous run with a larger cap left extra frames behind.
+    frames_dir.mkdir()
+    for index in range(1, 6):
+        (frames_dir / f"frame_{index:04d}.jpg").write_bytes(b"stale")
+
+    frames = ffmpeg.extract_frames(sample_video, frames_dir, interval_seconds=5.0, max_frames=2)
+    assert len(frames) == 2, "stale frames from a previous run must not be returned"
+    assert all(frame.read_bytes() != b"stale" for frame in frames)

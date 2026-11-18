@@ -104,3 +104,30 @@ ffmpeg -y -f lavfi -i "color=c=navy:s=1280x720:d=20" -i /tmp/speech.wav \
 
 Then upload and process through the API. The first run downloads the Whisper
 model from Hugging Face, so it needs network access.
+
+## Database schema changes
+
+There is no migration framework. `Base.metadata.create_all` never alters an
+existing table, so adding a column silently breaks every existing database with
+`no such column: <name>`. `init_db` therefore calls `_add_missing_columns`,
+which adds any model column missing from the live table. Only additive,
+nullable-or-defaulted columns are handled; anything else is skipped with a
+warning. If you need to drop, rename or retype a column, add a real migration
+step rather than extending that helper.
+
+## Provider provenance and fallback
+
+A run records which provider actually served each stage on `Project.providers`
+(`transcription`, `audio`, `vision`, `moment`) and exposes it as
+`ProjectOut.providers`. This matters because in `auto` mode a failing real
+provider degrades to its deterministic fake and the project still reports
+`ready` - fake-but-plausible clips, no error. Set
+`QUICKREEL_ALLOW_PROVIDER_FALLBACK=false` in production so the run fails loudly
+instead. Tests assert provenance in `test_full_pipeline_produces_ranked_clips`.
+
+## Testing real providers without network or credentials
+
+`LLMMomentProvider` takes an optional `transport=` argument. Tests pass
+`httpx.MockTransport(handler)` to drive the real request/retry/chunking code with
+no network. `google.generativeai` is deprecated in favour of `google.genai`; the
+vision provider still uses the former, so a migration is pending.

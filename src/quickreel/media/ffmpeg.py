@@ -204,6 +204,10 @@ def extract_frames(
     settings = get_settings()
     target_dir = Path(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
+    # Clear previous frames first: ffmpeg overwrites frame_0001..N but leaves any
+    # extras from an earlier run with a higher cap, which would be sampled back.
+    for stale in target_dir.glob("frame_*.jpg"):
+        stale.unlink(missing_ok=True)
     pattern = str(target_dir / "frame_%04d.jpg")
     _run(
         [
