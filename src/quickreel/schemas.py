@@ -326,3 +326,65 @@ class SubscriptionRenewOut(BaseModel):
 
     renewed: int
     channel_ids: list[str] = Field(default_factory=list)
+
+
+# ---- Authentication and tenancy ----
+
+
+class SignupIn(BaseModel):
+    """Create an account. An empty ``workspace_name`` gets a sensible default."""
+
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=8, max_length=1024)
+    display_name: str = Field(default="", max_length=200)
+    workspace_name: str = Field(default="", max_length=200)
+
+
+class LoginIn(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    email: str
+    display_name: str = ""
+    created_at: datetime
+
+    _coerce_name = field_validator("display_name", mode="before")(_none_to_blank)
+
+
+class WorkspaceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    created_at: datetime
+
+    _coerce_name = field_validator("name", mode="before")(_none_to_blank)
+
+
+class WorkspaceSwitchIn(BaseModel):
+    workspace_id: str = Field(min_length=1, max_length=32)
+
+
+class PasswordChangeIn(BaseModel):
+    """Change the caller's password. The current one is required even though the
+    caller is already authenticated, so a stolen session cannot be escalated into
+    a stolen account."""
+
+    current_password: str = Field(min_length=1, max_length=1024)
+    new_password: str = Field(min_length=8, max_length=1024)
+
+
+class SessionOut(BaseModel):
+    """The caller's identity, their active workspace, and the ones they can
+    switch to. Returned by signup, login and ``/me`` so the frontend has one
+    shape to handle."""
+
+    user: UserOut
+    workspace: WorkspaceOut
+    role: str
+    workspaces: list[WorkspaceOut] = Field(default_factory=list)

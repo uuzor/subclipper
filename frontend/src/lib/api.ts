@@ -11,6 +11,7 @@ import type {
   PublishTarget,
   RemoteProbe,
   ScheduledPost,
+  Session,
   YouTubeEvent,
 } from "./types";
 
@@ -31,6 +32,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${BASE}${path}`, {
+      // The session is an httpOnly cookie, so it is only sent if the browser is
+      // told to include credentials. Without this every authenticated request
+      // would look anonymous.
+      credentials: "include",
       headers:
         init?.body instanceof FormData
           ? undefined
@@ -42,6 +47,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       "Cannot reach the QuickReel server. Start it with `make api`.",
       0,
     );
+  }
+
+  // A 401 anywhere means the session ended (expired, revoked, or logged out in
+  // another tab). Broadcast it so the shell can react instead of every caller
+  // having to special-case it.
+  if (res.status === 401) {
+    window.dispatchEvent(new Event("quickreel:unauthorized"));
   }
 
   if (res.status === 204) return undefined as T;
@@ -78,6 +90,42 @@ function errorMessage(payload: unknown, status: number): string {
 }
 
 export const api = {
+  /* ---- Authentication and tenancy ---- */
+
+  signup: (body: {
+    email: string;
+    password: string;
+    display_name?: string;
+    workspace_name?: string;
+  }) =>
+    request<Session>("/auth/signup", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  login: (body: { email: string; password: string }) =>
+    request<Session>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  logout: () => request<void>("/auth/logout", { method: "POST" }),
+
+  /** The current identity, or a 401 when there is no session. */
+  me: () => request<Session>("/auth/me"),
+
+  switchWorkspace: (workspace_id: string) =>
+    request<Session>("/auth/workspace", {
+      method: "POST",
+      body: JSON.stringify({ workspace_id }),
+    }),
+
+  changePassword: (body: { current_password: string; new_password: string }) =>
+    request<void>("/auth/password", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   createProject: (title = "Untitled project") =>
     request<Project>("/projects", {
       method: "POST",
@@ -97,6 +145,7 @@ export const api = {
       form.append("file", file);
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `${BASE}/projects/${id}/upload`);
+      xhr.withCredentials = true;
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) onProgress?.(Math.round((e.loaded / e.total) * 100));
       };

@@ -31,7 +31,7 @@ from ...config import get_settings
 from ...db import get_db
 from ...logging_setup import get_logger
 from ...media.downloader import DownloadError, get_downloader
-from ...models import ChannelSubscription, SubscriptionStatus
+from ...models import ChannelSubscription, SubscriptionStatus, Workspace
 from ...schemas import (
     ChannelSubscriptionIn,
     ChannelSubscriptionOut,
@@ -45,6 +45,7 @@ from ...triggers import (
 from ...triggers.hub import default_hub_client
 from ...triggers.service import create_subscription, renew_due_subscriptions, revoke_subscription
 from ...triggers.youtube import handle_notification
+from ..deps import current_workspace, scoped_or_404
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/v1/triggers", tags=["triggers"])
@@ -176,9 +177,14 @@ async def notify(
 
 
 @router.post("/youtube/subscriptions", response_model=ChannelSubscriptionOut, status_code=201)
-def subscribe(payload: ChannelSubscriptionIn, db: Session = Depends(get_db)) -> ChannelSubscription:
+def subscribe(
+    payload: ChannelSubscriptionIn,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> ChannelSubscription:
     subscription = create_subscription(
         db,
+        workspace_id=workspace.id,
         channel_id=payload.channel_id,
         channel_title=payload.channel_title,
         authorized_by=payload.authorized_by,
@@ -189,38 +195,68 @@ def subscribe(payload: ChannelSubscriptionIn, db: Session = Depends(get_db)) -> 
 
 
 @router.get("/youtube/subscriptions", response_model=list[ChannelSubscriptionOut])
-def list_subscriptions(db: Session = Depends(get_db)) -> list[ChannelSubscription]:
+def list_subscriptions(
+    db: Session = Depends(get_db), workspace: Workspace = Depends(current_workspace)
+) -> list[ChannelSubscription]:
     return list(
-        db.scalars(select(ChannelSubscription).order_by(ChannelSubscription.created_at)).all()
+        db.scalars(
+            select(ChannelSubscription)
+            .where(ChannelSubscription.workspace_id == workspace.id)
+            .order_by(ChannelSubscription.created_at)
+        ).all()
     )
 
 
 @router.delete("/youtube/subscriptions/{subscription_id}", status_code=204)
-def delete_subscription(subscription_id: str, db: Session = Depends(get_db)) -> None:
-    subscription = db.get(ChannelSubscription, subscription_id)
-    if subscription is None:
-        raise HTTPException(status_code=404, detail="subscription not found")
+def delete_subscription(
+    subscription_id: str,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> None:
+    subscription = scoped_or_404(
+        db, ChannelSubscription, subscription_id, workspace.id, "subscription"
+    )
     revoke_subscription(db, subscription)
 
 
 @router.post("/youtube/subscriptions/renew", response_model=SubscriptionRenewOut)
-def renew(db: Session = Depends(get_db)) -> SubscriptionRenewOut:
-    """Renew every lapsed or soon-to-lapse lease. The periodic worker's call."""
-    renewed = renew_due_subscriptions(db)
+def renew(
+    db: Session = Depends(get_db), workspace: Workspace = Depends(current_workspace)
+) -> SubscriptionRenewOut:
+    """Renew the caller's lapsed or soon-to-lapse leases.
+
+    The periodic worker calls :func:`renew_due_subscriptions` directly with no
+    workspace, so one sweep serves everyone; this endpoint is the per-tenant
+    "renew mine now" button.
+    """
+    renewed = renew_due_subscriptions(db, workspace_id=workspace.id)
     return SubscriptionRenewOut(renewed=len(renewed), channel_ids=[s.channel_id for s in renewed])
 
 
 @router.get("/youtube/events", response_model=list[YouTubeEventOut])
-def list_events(db: Session = Depends(get_db)) -> list:
+def list_events(
+    db: Session = Depends(get_db), workspace: Workspace = Depends(current_workspace)
+) -> list:
+    """Recent notifications for the caller's channels only.
+
+    Events are reached through their subscription, which is what carries the
+    workspace. An event with no subscription (an unknown channel we ignored) has
+    no tenant and is therefore never shown to anyone.
+    """
     from ...models import YouTubeEvent
 
-    return list(
-        db.scalars(select(YouTubeEvent).order_by(YouTubeEvent.received_at.desc()).limit(200)).all()
+    query = (
+        select(YouTubeEvent)
+        .join(ChannelSubscription, ChannelSubscription.id == YouTubeEvent.subscription_id)
+        .where(ChannelSubscription.workspace_id == workspace.id)
+        .order_by(YouTubeEvent.received_at.desc())
+        .limit(200)
     )
+    return list(db.scalars(query).all())
 
 
 @router.get("/youtube/hub")
-def hub_info() -> dict:
+def hub_info(workspace: Workspace = Depends(current_workspace)) -> dict:
     """What the hub integration needs, so an operator can see the callback URL."""
     settings = get_settings()
     from ...triggers.hub import callback_url_for

@@ -233,3 +233,32 @@
     width: 100%;
   }
 }
+
+/* ---- password panel ---- */
+.panel-note {
+  color: var(--ink-soft);
+  font-size: 14px;
+  margin-bottom: var(--s5);
+}
+
+.panel-notice {
+  padding: 11px 14px;
+  background: var(--cobalt-wash);
+  border-left: 3px solid var(--cobalt);
+  border-radius: var(--r-sm);
+  font-size: 14px;
+}
+
+.panel-error {
+  padding: 10px 13px;
+  background: var(--crimson-wash);
+  border-left: 3px solid var(--crimson);
+  border-radius: var(--r-sm);
+  font-size: 14px;
+}
+
+.password-form {
+  display: grid;
+  gap: var(--s4);
+  max-width: 420px;
+}

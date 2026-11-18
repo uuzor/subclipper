@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { useAuth } from "../lib/auth";
 import { Timeline } from "../components/Timeline";
 import { ScoreBreakdown } from "../components/ScoreBreakdown";
 import { IconArrow, IconScissors, IconWarn } from "../components/icons";
@@ -147,6 +148,10 @@ const WEIGHTS: { label: string; pct: number; note: string }[] = [
 ];
 
 function Landing() {
+  const { session } = useAuth();
+  // Send a signed-in visitor straight to the workbench, and everyone else
+  // through the front door first.
+  const workbenchTarget = session ? "/workbench" : "/signin";
   return (
     <>
       {/* 1. First viewport: the mechanism, at scale. ------------------- */}
@@ -164,7 +169,7 @@ function Landing() {
                 worth posting — then trims each one to its own sentence.
               </p>
               <div className="hero-actions">
-                <Link to="/workbench" className="btn btn-primary">
+                <Link to={workbenchTarget} className="btn btn-primary">
                   Drop a video
                   <IconArrow size={18} />
                 </Link>
@@ -341,7 +346,7 @@ function Landing() {
         <div className="shell close-inner">
           <IconScissors size={30} />
           <h2 className="close-title">Bring a long video. Take out the short ones.</h2>
-          <Link to="/workbench" className="btn btn-primary close-cta">
+          <Link to={workbenchTarget} className="btn btn-primary close-cta">
             Open the workbench
             <IconArrow size={18} />
           </Link>

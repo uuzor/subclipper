@@ -95,12 +95,23 @@ def _claim(session: Session, post_id: str) -> bool:
     return result.rowcount == 1
 
 
-def due_posts(session: Session, *, now: datetime | None = None, limit: int = 50) -> list[str]:
+def due_posts(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    limit: int = 50,
+    workspace_id: str | None = None,
+) -> list[str]:
     """Ids of posts that are ready to publish, oldest first.
 
     A post is due when it is ``scheduled`` and its time has passed, or ``failed``
     with a backoff that has now elapsed. Posts whose target is not ``active`` are
     skipped: publishing to a disconnected account can only fail.
+
+    ``workspace_id`` narrows the sweep to one tenant, which is what the HTTP
+    "run now" button passes. The periodic worker leaves it None so one pass
+    serves every workspace; that is why the target is scoped rather than the
+    post, since the target carries the ``workspace_id``.
     """
     now = now or _utcnow()
     query = (
@@ -123,6 +134,8 @@ def due_posts(session: Session, *, now: datetime | None = None, limit: int = 50)
         .order_by(ScheduledPost.scheduled_for)
         .limit(limit)
     )
+    if workspace_id is not None:
+        query = query.where(PublishTarget.workspace_id == workspace_id)
     return list(session.scalars(query).all())
 
 
@@ -279,10 +292,14 @@ def publish_post(
 
 
 def run_due_posts(
-    session: Session, *, now: datetime | None = None, limit: int = 50
+    session: Session,
+    *,
+    now: datetime | None = None,
+    limit: int = 50,
+    workspace_id: str | None = None,
 ) -> list[PublishOutcome]:
     """Publish every post that is due. The entry point a worker calls."""
     outcomes: list[PublishOutcome] = []
-    for post_id in due_posts(session, now=now, limit=limit):
+    for post_id in due_posts(session, now=now, limit=limit, workspace_id=workspace_id):
         outcomes.append(publish_post(session, post_id))
     return outcomes

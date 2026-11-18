@@ -72,16 +72,19 @@ def test_clip_null_json_columns_become_empty_dicts():
     assert out.render_meta == {}
 
 
-def test_project_list_endpoint_survives_null_providers(client):
+def test_project_list_endpoint_survives_null_providers(auth_client):
     """End-to-end guard: a NULL-providers row must not break the list route."""
     from sqlalchemy import text
 
     from quickreel.db import get_sessionmaker
 
+    # The row must belong to the caller's workspace to appear in the listing;
+    # what is under test here is the NULL-providers coercion, not tenancy.
+    workspace_id = auth_client.get("/api/v1/auth/me").json()["workspace"]["id"]
     project_id = f"legacy{uuid.uuid4().hex}"
     session = get_sessionmaker()()
     try:
-        session.add(Project(id=project_id, title="Legacy"))
+        session.add(Project(id=project_id, title="Legacy", workspace_id=workspace_id))
         session.commit()
         session.execute(
             text("UPDATE projects SET providers = NULL WHERE id = :id"),
@@ -91,7 +94,7 @@ def test_project_list_endpoint_survives_null_providers(client):
     finally:
         session.close()
 
-    response = client.get("/api/v1/projects")
+    response = auth_client.get("/api/v1/projects")
     assert response.status_code == 200, response.text
     legacy = next(p for p in response.json() if p["id"] == project_id)
     assert legacy["providers"] == {}

@@ -193,6 +193,16 @@ class Settings(BaseSettings):
         return self.env.strip().lower() in {"production", "prod"}
 
     @property
+    def auth_require_secure_cookies(self) -> bool:
+        """Whether the public origin is HTTPS, so cookies can be marked Secure.
+
+        Derived rather than a separate switch: a deployment that says it is at an
+        HTTPS origin should send Secure cookies, and one that is not cannot
+        afford to, because the browser would drop them and nobody could log in.
+        """
+        return self.public_base_url.strip().lower().startswith("https://")
+
+    @property
     def effective_publishing_mode(self) -> str:
         """The mode actually used, resolving the empty default.
 
@@ -232,6 +242,12 @@ class Settings(BaseSettings):
             problems.append(
                 "QUICKREEL_YOUTUBE_CALLBACK_SECRET must be set in production; "
                 "the WebSub callback is public and unsigned without it"
+            )
+        if not self.auth_require_secure_cookies:
+            problems.append(
+                "QUICKREEL_PUBLIC_BASE_URL must be an https:// origin in production; "
+                "session cookies are marked Secure from it, and over plain HTTP the "
+                "session cookie would travel in the clear"
             )
         if problems:
             raise ValueError("unsafe production configuration: " + "; ".join(problems))

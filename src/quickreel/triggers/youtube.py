@@ -222,6 +222,9 @@ def handle_notification(
     effective_auto = subscription.auto_process if auto_process is None else auto_process
 
     project = Project(
+        # The project belongs to whichever tenant watches this channel, so a
+        # channel's uploads never land in another workspace.
+        workspace_id=subscription.workspace_id,
         title=notification.title or getattr(info, "title", "") or "Untitled project",
         source_kind="channel_subscription",
         source_url=validated.url,

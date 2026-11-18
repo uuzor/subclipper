@@ -22,8 +22,9 @@ from ... import oauth
 from ...config import get_settings
 from ...db import get_db
 from ...logging_setup import get_logger
-from ...models import Platform, PublishTarget
+from ...models import Platform, PublishTarget, Workspace
 from ...schemas import OAuthStartOut
+from ..deps import current_workspace
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/v1/oauth", tags=["oauth"])
@@ -40,16 +41,19 @@ def list_providers() -> dict:
 
 
 @router.get("/{platform}/start", response_model=OAuthStartOut)
-def start(platform: str) -> OAuthStartOut:
+def start(
+    platform: str, workspace: Workspace = Depends(current_workspace)
+) -> OAuthStartOut:
     """Return the consent URL for the browser to navigate to.
 
     Returned as JSON rather than a 302 so the frontend can open it in a popup
-    and keep the user's place in the app.
+    and keep the user's place in the app. The caller's workspace is signed into
+    the state, so the account that comes back is filed under this tenant.
     """
     if platform not in _known_platforms():
         raise HTTPException(status_code=404, detail=f"unknown platform {platform!r}")
     try:
-        url, state = oauth.authorization_url(platform)
+        url, state = oauth.authorization_url(platform, workspace_id=workspace.id)
     except oauth.OAuthError as exc:
         # 409 rather than 500: the platform is fine, the app is not configured.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -91,10 +95,11 @@ def callback(
         return back(connected="error", reason="missing code or state")
 
     try:
-        # Verifies the signature and the age, and returns the platform the state
-        # was issued for. Comparing it to the path segment closes the door on
-        # using a state issued for one platform on another's callback.
-        state_platform = oauth.verify_state(state)
+        # Verifies the signature and the age, and returns the platform and the
+        # workspace the state was issued for. Comparing the platform to the path
+        # segment closes the door on using a state issued for one platform on
+        # another's callback.
+        state_platform, state_workspace = oauth.verify_state(state)
     except oauth.OAuthError as exc:
         logger.warning("oauth.state_rejected", platform=platform, reason=str(exc))
         return back(connected="error", reason=str(exc))
@@ -104,6 +109,13 @@ def callback(
             "oauth.state_platform_mismatch", path_platform=platform, state_platform=state_platform
         )
         return back(connected="error", reason="OAuth state was issued for a different platform")
+
+    if db.get(Workspace, state_workspace) is None:
+        # The workspace was deleted while the user was on the consent screen.
+        # Refusing is the only safe answer: filing the account anywhere else
+        # would attach it to a tenant that did not ask for it.
+        logger.warning("oauth.workspace_missing", workspace_id=state_workspace)
+        return back(connected="error", reason="the workspace this flow started in no longer exists")
 
     try:
         token_payload = oauth.exchange_code(platform, code)
@@ -120,11 +132,13 @@ def callback(
         select(PublishTarget).where(
             PublishTarget.platform == Platform(platform),
             PublishTarget.external_account_id == account_id,
+            PublishTarget.workspace_id == state_workspace,
         )
     ).first()
 
     if target is None:
         target = PublishTarget(
+            workspace_id=state_workspace,
             platform=Platform(platform),
             external_account_id=account_id,
             display_name=token_payload.get("display_name", "") or f"{platform} account",

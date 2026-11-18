@@ -235,3 +235,26 @@ export interface HubInfo {
   signing_enabled: boolean;
   secret_configured: boolean;
 }
+
+/* ---- Authentication and tenancy ---- */
+
+export interface User {
+  id: string;
+  email: string;
+  display_name: string;
+  created_at: string;
+}
+
+export interface Workspace {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+/** The caller's identity plus the workspace they are acting in. */
+export interface Session {
+  user: User;
+  workspace: Workspace;
+  role: string;
+  workspaces: Workspace[];
+}

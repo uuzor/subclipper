@@ -35,7 +35,15 @@ def _client(monkeypatch, frontend_dir: Path | None):
     init_db()
     from quickreel.main import create_app
 
-    return TestClient(create_app())
+    # An https base so the Secure session cookie is sent back, and a signed-up
+    # user so an authenticated route answers 404 (unknown project) rather than
+    # 401 (no session), which is what the routing tests are about.
+    client = TestClient(create_app(), base_url="https://testserver")
+    client.post(
+        "/api/v1/auth/signup",
+        json={"email": f"serving-{id(client)}@example.com", "password": "serving-password"},
+    )
+    return client
 
 
 def test_root_serves_spa_shell(monkeypatch, dist):

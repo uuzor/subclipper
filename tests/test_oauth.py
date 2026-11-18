@@ -27,29 +27,42 @@ def _oauth_secret(monkeypatch):
 
 
 def test_state_round_trips_and_names_its_platform():
-    state = oauth.sign_state("tiktok")
-    assert oauth.verify_state(state) == "tiktok"
+    state = oauth.sign_state("tiktok", workspace_id="ws1")
+    assert oauth.verify_state(state) == ("tiktok", "ws1")
 
 
 def test_state_is_rejected_after_its_ttl():
-    state = oauth.sign_state("tiktok", now=time.time() - 3600)
+    state = oauth.sign_state("tiktok", workspace_id="ws1", now=time.time() - 3600)
     with pytest.raises(OAuthError, match="expired"):
         oauth.verify_state(state)
 
 
 def test_state_with_a_forged_signature_is_rejected():
-    state = oauth.sign_state("tiktok")
-    nonce, issued, platform, _signature = state.split(".")
-    forged = f"{nonce}.{issued}.{platform}.{'A' * 43}"
+    state = oauth.sign_state("tiktok", workspace_id="ws1")
+    nonce, issued, workspace, platform, _signature = state.split(".")
+    forged = f"{nonce}.{issued}.{workspace}.{platform}.{'A' * 43}"
     with pytest.raises(OAuthError, match="signature"):
         oauth.verify_state(forged)
 
 
 def test_state_cannot_be_edited_to_change_platform():
     """The platform is inside the signed payload, so it cannot be swapped."""
-    state = oauth.sign_state("tiktok")
-    nonce, issued, _platform, signature = state.split(".")
-    tampered = f"{nonce}.{issued}.instagram_reels.{signature}"
+    state = oauth.sign_state("tiktok", workspace_id="ws1")
+    nonce, issued, workspace, _platform, signature = state.split(".")
+    tampered = f"{nonce}.{issued}.{workspace}.instagram_reels.{signature}"
+    with pytest.raises(OAuthError, match="signature"):
+        oauth.verify_state(tampered)
+
+
+def test_state_cannot_be_edited_to_change_workspace():
+    """The tenant is signed too, so a flow cannot be redirected to another one.
+
+    Without this, a user could start a connect flow in their own workspace and
+    edit the callback to file the resulting account under a different tenant.
+    """
+    state = oauth.sign_state("tiktok", workspace_id="ws1")
+    nonce, issued, _workspace, platform, signature = state.split(".")
+    tampered = f"{nonce}.{issued}.ws2.{platform}.{signature}"
     with pytest.raises(OAuthError, match="signature"):
         oauth.verify_state(tampered)
 
@@ -62,11 +75,13 @@ def test_malformed_state_is_rejected():
 
 def test_each_flow_gets_a_distinct_state():
     """Two flows started at the same instant must not share a state."""
-    assert oauth.sign_state("tiktok") != oauth.sign_state("tiktok")
+    first = oauth.sign_state("tiktok", workspace_id="ws1")
+    second = oauth.sign_state("tiktok", workspace_id="ws1")
+    assert first != second
 
 
 def test_a_different_secret_cannot_verify_a_state(monkeypatch):
-    state = oauth.sign_state("tiktok")
+    state = oauth.sign_state("tiktok", workspace_id="ws1")
     monkeypatch.setenv("QUICKREEL_OAUTH_STATE_SECRET", "a-different-secret")
     get_settings.cache_clear()
     with pytest.raises(OAuthError, match="signature"):
@@ -86,18 +101,18 @@ def test_authorization_url_requires_a_configured_client(monkeypatch):
     monkeypatch.setenv("QUICKREEL_TIKTOK_CLIENT_ID", "")
     get_settings.cache_clear()
     with pytest.raises(OAuthError, match="QUICKREEL_TIKTOK_CLIENT_ID"):
-        oauth.authorization_url("tiktok")
+        oauth.authorization_url("tiktok", workspace_id="ws1")
 
 
 def test_authorization_url_carries_the_expected_parameters(monkeypatch):
     monkeypatch.setenv("QUICKREEL_TIKTOK_CLIENT_ID", "client-123")
     get_settings.cache_clear()
-    url, state = oauth.authorization_url("tiktok")
+    url, state = oauth.authorization_url("tiktok", workspace_id="ws1")
     assert url.startswith("https://www.tiktok.com/v2/auth/authorize/?")
     assert "client_id=client-123" in url
     assert "response_type=code" in url
     assert "video.publish" in url
-    assert oauth.verify_state(state) == "tiktok"
+    assert oauth.verify_state(state) == ("tiktok", "ws1")
 
 
 def test_scopes_are_minimal_for_publishing():
@@ -124,7 +139,7 @@ def test_unknown_platform_is_rejected():
 
 
 def test_state_fingerprint_is_not_the_state():
-    state = oauth.sign_state("tiktok")
+    state = oauth.sign_state("tiktok", workspace_id="ws1")
     fingerprint = oauth.state_fingerprint(state)
     assert fingerprint != state
     assert state not in fingerprint

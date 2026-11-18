@@ -11,9 +11,10 @@ from sqlalchemy.orm import Session
 
 from ...db import get_db
 from ...logging_setup import get_logger
-from ...models import Clip, Project
+from ...models import Clip, Project, Workspace
 from ...rendering.renderer import render_clip
 from ...schemas import ClipOut, RenderRequest
+from ..deps import current_workspace, get_scoped_project
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["clips"])
@@ -31,10 +32,11 @@ def list_clips(
     min_score: float = 0.0,
     moment_type: str | None = None,
     db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
 ) -> list[ClipOut]:
-    project = db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
+    # Resolving the project through the workspace scope is what stops a clip
+    # list being read by an id guess from another tenant.
+    get_scoped_project(db, project_id, workspace.id)
 
     query = select(Clip).where(Clip.project_id == project_id)
     if min_score:
@@ -46,11 +48,28 @@ def list_clips(
 
 
 @router.get("/clips/{clip_id}", response_model=ClipOut)
-def get_clip(clip_id: str, db: Session = Depends(get_db)) -> ClipOut:
-    clip = db.get(Clip, clip_id)
+def get_clip(
+    clip_id: str,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> ClipOut:
+    return _clip_out(_scoped_clip(db, clip_id, workspace.id))
+
+
+def _scoped_clip(db: Session, clip_id: str, workspace_id: str) -> Clip:
+    """A clip the caller may see, found through its project's workspace.
+
+    Clips have no ``workspace_id`` of their own; they inherit the project's.
+    Joining rather than denormalising keeps the two from drifting apart.
+    """
+    clip = db.scalars(
+        select(Clip)
+        .join(Project, Project.id == Clip.project_id)
+        .where(Clip.id == clip_id, Project.workspace_id == workspace_id)
+    ).first()
     if clip is None:
         raise HTTPException(status_code=404, detail="clip not found")
-    return _clip_out(clip)
+    return clip
 
 
 @router.post("/projects/{project_id}/render", response_model=list[ClipOut])
@@ -58,13 +77,20 @@ def render_project_clips(
     project_id: str,
     payload: RenderRequest,
     db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
 ) -> list[ClipOut]:
-    project = db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
+    get_scoped_project(db, project_id, workspace.id)
 
     if payload.clip_ids:
-        clips = list(db.scalars(select(Clip).where(Clip.id.in_(payload.clip_ids))))
+        # Both filters: the ids come from the client, so the project scope is
+        # what stops a caller rendering another tenant's clip by passing its id.
+        clips = list(
+            db.scalars(
+                select(Clip).where(
+                    Clip.id.in_(payload.clip_ids), Clip.project_id == project_id
+                )
+            )
+        )
     else:
         clips = list(
             db.scalars(
@@ -96,10 +122,12 @@ def render_project_clips(
 
 
 @router.get("/clips/{clip_id}/download")
-def download_clip(clip_id: str, db: Session = Depends(get_db)) -> FileResponse:
-    clip = db.get(Clip, clip_id)
-    if clip is None:
-        raise HTTPException(status_code=404, detail="clip not found")
+def download_clip(
+    clip_id: str,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> FileResponse:
+    clip = _scoped_clip(db, clip_id, workspace.id)
     if not clip.render_path or not Path(clip.render_path).exists():
         raise HTTPException(status_code=409, detail="clip has not been rendered yet")
     return FileResponse(

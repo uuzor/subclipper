@@ -132,10 +132,126 @@ class YouTubeEventStatus(enum.StrEnum):
     failed = "failed"
 
 
+class WorkspaceRole(enum.StrEnum):
+    """A member's rights inside one workspace.
+
+    ``owner`` may manage members and delete the workspace; ``member`` may work
+    with the workspace's projects, clips and connected accounts but not change
+    who else has access.
+    """
+
+    owner = "owner"
+    member = "member"
+
+
+class User(Base):
+    """An authenticated person.
+
+    The account is deliberately separate from the workspace. Signing up creates
+    both, but a user can belong to more than one workspace, which is what makes
+    an agency able to work inside a client's tenancy without sharing a login.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    # Stored already normalised (lowercased, trimmed) by quickreel.auth, and
+    # unique so two accounts cannot share an address.
+    email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(Text)
+    display_name: Mapped[str] = mapped_column(String(200), default="")
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now, onupdate=_now)
+
+    memberships: Mapped[list[Membership]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    sessions: Mapped[list[UserSession]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class Workspace(Base):
+    """A tenant. Every piece of content belongs to exactly one.
+
+    This is the isolation boundary: projects, clips, connected publishing
+    accounts and watched channels are all scoped by ``workspace_id``, and every
+    query filters on the caller's workspace. Nothing is shared implicitly.
+    """
+
+    __tablename__ = "workspaces"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(200), default="My workspace")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now, onupdate=_now)
+
+    memberships: Mapped[list[Membership]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+
+
+class Membership(Base):
+    """Which users belong to which workspace, and with what role."""
+
+    __tablename__ = "memberships"
+    __table_args__ = (UniqueConstraint("user_id", "workspace_id", name="uq_membership"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[WorkspaceRole] = mapped_column(
+        Enum(WorkspaceRole, native_enum=False), default=WorkspaceRole.owner
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+
+    user: Mapped[User] = relationship(back_populates="memberships")
+    workspace: Mapped[Workspace] = relationship(back_populates="memberships")
+
+
+class UserSession(Base):
+    """A logged-in browser session.
+
+    Sessions are rows, not signed tokens, so that logging out and revoking access
+    actually take effect. ``token_hash`` stores a SHA-256 of the cookie value, so
+    a leaked database does not yield usable session tokens.
+    """
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # The workspace the session is currently acting in. A user in several
+    # workspaces switches this rather than holding several sessions.
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    user_agent: Mapped[str] = mapped_column(String(400), default="")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+
+    user: Mapped[User] = relationship(back_populates="sessions")
+
+
 class Project(Base):
     __tablename__ = "projects"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    # The tenant that owns this project. Every read and write filters on it.
+    # Nullable only so the additive-column migration can backfill rows that
+    # predate tenancy; application code always sets it.
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     title: Mapped[str] = mapped_column(String(500), default="Untitled project")
     source_kind: Mapped[str] = mapped_column(String(32), default="upload")
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -153,7 +269,10 @@ class Project(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Which provider actually served each stage. Empty until the pipeline runs.
     # Recorded so a silently degraded run is auditable after the fact.
-    providers: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Nullable because the column was added to existing databases by the
+    # additive migration, which can only create it without a default, so legacy
+    # rows hold NULL. The API's ``_none_to_empty`` validators read that as ``{}``.
+    providers: Mapped[dict | None] = mapped_column(JSON, default=dict, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now, onupdate=_now)
 
@@ -252,6 +371,11 @@ class PublishTarget(Base):
     __tablename__ = "publish_targets"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    # Connected accounts belong to a tenant, so one workspace's TikTok account is
+    # never visible to, or usable by, another.
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     platform: Mapped[Platform] = mapped_column(Enum(Platform, native_enum=False))
     display_name: Mapped[str] = mapped_column(String(200), default="")
     external_account_id: Mapped[str] = mapped_column(String(200), default="")
@@ -377,6 +501,11 @@ class ChannelSubscription(Base):
     __tablename__ = "channel_subscriptions"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    # The tenant that watches this channel, and therefore owns every project the
+    # subscription produces.
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     platform: Mapped[Platform] = mapped_column(
         Enum(Platform, native_enum=False), default=Platform.youtube_shorts
     )

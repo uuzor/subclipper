@@ -14,7 +14,7 @@ from ...db import get_db
 from ...logging_setup import get_logger
 from ...media.downloader import DownloadError, get_downloader
 from ...media.url_source import BlockedSourceUrl, SourceUrlError, validate_source_url
-from ...models import MediaAsset, Project, ProjectStatus
+from ...models import MediaAsset, Project, ProjectStatus, Workspace
 from ...pipeline.orchestrator import Pipeline, PipelineError
 from ...pipeline.tasks import enqueue_project
 from ...schemas import (
@@ -24,6 +24,7 @@ from ...schemas import (
     RemoteProbeOut,
     UrlIngestIn,
 )
+from ..deps import current_workspace, get_scoped_project
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
@@ -75,8 +76,13 @@ def _attach_url_source(db: Session, project: Project, url: str) -> None:
 
 
 @router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
-def create_project(payload: ProjectCreateIn, db: Session = Depends(get_db)) -> Project:
+def create_project(
+    payload: ProjectCreateIn,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> Project:
     project = Project(
+        workspace_id=workspace.id,
         title=payload.title,
         source_kind="upload",
         license_note=payload.license_note,
@@ -93,7 +99,9 @@ def create_project(payload: ProjectCreateIn, db: Session = Depends(get_db)) -> P
 
 
 @router.post("/source-url/probe", response_model=RemoteProbeOut)
-def probe_source_url(payload: UrlIngestIn) -> RemoteProbeOut:
+def probe_source_url(
+    payload: UrlIngestIn, workspace: Workspace = Depends(current_workspace)
+) -> RemoteProbeOut:
     """Fetch metadata for a URL without downloading the video.
 
     Lets a client show the title, uploader and duration, and confirm the link is
@@ -118,16 +126,25 @@ def probe_source_url(payload: UrlIngestIn) -> RemoteProbeOut:
 
 
 @router.get("", response_model=list[ProjectOut])
-def list_projects(db: Session = Depends(get_db)) -> list[Project]:
-    return list(db.scalars(select(Project).order_by(Project.created_at.desc())))
+def list_projects(
+    db: Session = Depends(get_db), workspace: Workspace = Depends(current_workspace)
+) -> list[Project]:
+    return list(
+        db.scalars(
+            select(Project)
+            .where(Project.workspace_id == workspace.id)
+            .order_by(Project.created_at.desc())
+        )
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectDetailOut)
-def get_project(project_id: str, db: Session = Depends(get_db)) -> Project:
-    project = db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    return project
+def get_project(
+    project_id: str,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> Project:
+    return get_scoped_project(db, project_id, workspace.id)
 
 
 @router.post("/{project_id}/upload", response_model=ProjectDetailOut)
@@ -135,11 +152,10 @@ def upload_video(
     project_id: str,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
 ) -> Project:
     settings = get_settings()
-    project = db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
+    project = get_scoped_project(db, project_id, workspace.id)
 
     destination = settings.uploads_dir / f"{project.id}{_safe_suffix(file.filename)}"
     size = 0
@@ -176,14 +192,13 @@ def set_project_source_url(
     project_id: str,
     payload: UrlIngestIn,
     db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
 ) -> Project:
     """Attach a remote video URL to an existing project.
 
     Mirrors ``/upload``: the file is fetched when the project is processed.
     """
-    project = db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
+    project = get_scoped_project(db, project_id, workspace.id)
 
     url = _validate_url(str(payload.source_url))
     _attach_url_source(db, project, url)
@@ -196,10 +211,12 @@ def set_project_source_url(
 
 
 @router.post("/{project_id}/process", response_model=ProjectOut, status_code=202)
-def process_project(project_id: str, db: Session = Depends(get_db)) -> Project:
-    project = db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
+def process_project(
+    project_id: str,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> Project:
+    project = get_scoped_project(db, project_id, workspace.id)
     if project.media is None:
         raise HTTPException(
             status_code=400,
@@ -223,10 +240,12 @@ def process_project(project_id: str, db: Session = Depends(get_db)) -> Project:
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_project(project_id: str, db: Session = Depends(get_db)) -> None:
-    project = db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
+def delete_project(
+    project_id: str,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> None:
+    project = get_scoped_project(db, project_id, workspace.id)
     if project.media is not None and project.media.path:
         Path(project.media.path).unlink(missing_ok=True)
     for clip in project.clips:

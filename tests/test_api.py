@@ -9,13 +9,13 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def _create_and_upload(client, sample_video: Path) -> dict:
-    created = client.post("/api/v1/projects", json={"title": "Podcast episode"})
+def _create_and_upload(auth_client, sample_video: Path) -> dict:
+    created = auth_client.post("/api/v1/projects", json={"title": "Podcast episode"})
     assert created.status_code == 201, created.text
     project_id = created.json()["id"]
 
     with sample_video.open("rb") as handle:
-        response = client.post(
+        response = auth_client.post(
             f"/api/v1/projects/{project_id}/upload",
             files={"file": ("sample.mp4", handle, "video/mp4")},
         )
@@ -23,32 +23,32 @@ def _create_and_upload(client, sample_video: Path) -> dict:
     return response.json()
 
 
-def test_health_endpoints(client):
-    assert client.get("/healthz").json() == {"status": "ok"}
-    ready = client.get("/readyz").json()
+def test_health_endpoints(auth_client):
+    assert auth_client.get("/healthz").json() == {"status": "ok"}
+    ready = auth_client.get("/readyz").json()
     assert ready["status"] == "ok"
     assert set(ready["providers"]) == {"transcription", "vision", "moment"}
 
 
-def test_upload_rejects_unknown_project(client, sample_video):
+def test_upload_rejects_unknown_project(auth_client, sample_video):
     with sample_video.open("rb") as handle:
-        response = client.post(
+        response = auth_client.post(
             "/api/v1/projects/does-not-exist/upload",
             files={"file": ("sample.mp4", handle, "video/mp4")},
         )
     assert response.status_code == 404
 
 
-def test_full_pipeline_produces_ranked_clips(client, sample_video):
-    project = _create_and_upload(client, sample_video)
+def test_full_pipeline_produces_ranked_clips(auth_client, sample_video):
+    project = _create_and_upload(auth_client, sample_video)
     project_id = project["id"]
 
-    processed = client.post(f"/api/v1/projects/{project_id}/process")
+    processed = auth_client.post(f"/api/v1/projects/{project_id}/process")
     assert processed.status_code == 202, processed.text
     body = processed.json()
     assert body["status"] == "ready", body
 
-    clips = client.get(f"/api/v1/projects/{project_id}/clips").json()
+    clips = auth_client.get(f"/api/v1/projects/{project_id}/clips").json()
     assert clips, "pipeline should produce candidate clips"
 
     ranks = [clip["rank"] for clip in clips]
@@ -60,22 +60,22 @@ def test_full_pipeline_produces_ranked_clips(client, sample_video):
         assert clip["end_seconds"] > clip["start_seconds"]
         assert clip["score_breakdown"]["components"]
 
-    transcript = client.get(f"/api/v1/projects/{project_id}").json()["transcript"]
+    transcript = auth_client.get(f"/api/v1/projects/{project_id}").json()["transcript"]
     assert transcript is not None
     assert transcript["segments"]
 
     # Which provider served each stage must be recorded on the project, so a
     # degraded run is auditable after the fact.
-    detail = client.get(f"/api/v1/projects/{project_id}").json()
+    detail = auth_client.get(f"/api/v1/projects/{project_id}").json()
     assert set(detail["providers"]) == {"transcription", "audio", "vision", "moment"}
 
 
-def test_render_and_download_top_clip(client, sample_video):
-    project = _create_and_upload(client, sample_video)
+def test_render_and_download_top_clip(auth_client, sample_video):
+    project = _create_and_upload(auth_client, sample_video)
     project_id = project["id"]
-    assert client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
 
-    rendered = client.post(
+    rendered = auth_client.post(
         f"/api/v1/projects/{project_id}/render",
         json={"max_clips": 1, "burn_captions": True},
     )
@@ -84,81 +84,87 @@ def test_render_and_download_top_clip(client, sample_video):
     assert len(clips) == 1
     assert clips[0]["status"] == "rendered"
 
-    download = client.get(f"/api/v1/clips/{clips[0]['id']}/download")
+    download = auth_client.get(f"/api/v1/clips/{clips[0]['id']}/download")
     assert download.status_code == 200
     assert download.headers["content-type"] == "video/mp4"
     assert len(download.content) > 0
 
 
-def test_download_before_render_returns_conflict(client, sample_video):
-    project = _create_and_upload(client, sample_video)
+def test_download_before_render_returns_conflict(auth_client, sample_video):
+    project = _create_and_upload(auth_client, sample_video)
     project_id = project["id"]
-    assert client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
-    clip_id = client.get(f"/api/v1/projects/{project_id}/clips").json()[0]["id"]
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+    clip_id = auth_client.get(f"/api/v1/projects/{project_id}/clips").json()[0]["id"]
 
-    response = client.get(f"/api/v1/clips/{clip_id}/download")
+    response = auth_client.get(f"/api/v1/clips/{clip_id}/download")
     assert response.status_code == 409
 
 
-def test_clip_filters(client, sample_video):
-    project = _create_and_upload(client, sample_video)
+def test_clip_filters(auth_client, sample_video):
+    project = _create_and_upload(auth_client, sample_video)
     project_id = project["id"]
-    assert client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
 
-    high_only = client.get(f"/api/v1/projects/{project_id}/clips?min_score=90").json()
+    high_only = auth_client.get(f"/api/v1/projects/{project_id}/clips?min_score=90").json()
     assert all(clip["score"] >= 90 for clip in high_only)
 
 
-def test_process_requires_media(client):
+def test_process_requires_media(auth_client):
     from quickreel.db import get_sessionmaker
     from quickreel.models import Project
 
+    # The project has to be in the caller's workspace, or the request is a 404
+    # (not the caller's project) rather than the 400 this test is about.
+    workspace_id = auth_client.get("/api/v1/auth/me").json()["workspace"]["id"]
     session = get_sessionmaker()()
     try:
-        project = Project(title="Empty")
+        project = Project(title="Empty", workspace_id=workspace_id)
         session.add(project)
         session.commit()
         project_id = project.id
     finally:
         session.close()
 
-    response = client.post(f"/api/v1/projects/{project_id}/process")
+    response = auth_client.post(f"/api/v1/projects/{project_id}/process")
     assert response.status_code == 400
 
 
-def test_delete_project_removes_clips(client, sample_video):
-    project = _create_and_upload(client, sample_video)
+def test_delete_project_removes_clips(auth_client, sample_video):
+    project = _create_and_upload(auth_client, sample_video)
     project_id = project["id"]
-    assert client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
 
-    assert client.delete(f"/api/v1/projects/{project_id}").status_code == 204
-    assert client.get(f"/api/v1/projects/{project_id}").status_code == 404
+    assert auth_client.delete(f"/api/v1/projects/{project_id}").status_code == 204
+    assert auth_client.get(f"/api/v1/projects/{project_id}").status_code == 404
 
 
-def test_reprocess_replaces_renders_without_orphaning_files(client, sample_video):
+def test_reprocess_replaces_renders_without_orphaning_files(auth_client, sample_video):
     """Re-processing must delete the old rendered MP4s, not leave them on disk."""
-    project = _create_and_upload(client, sample_video)
+    project = _create_and_upload(auth_client, sample_video)
     project_id = project["id"]
-    assert client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
-    rendered = client.post(f"/api/v1/projects/{project_id}/render", json={"max_clips": 1}).json()
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+    rendered = auth_client.post(
+        f"/api/v1/projects/{project_id}/render",
+        json={"max_clips": 1}).json(
+    )
     first_render = Path(rendered[0]["render_path"])
     assert first_render.exists()
 
     # Re-run the pipeline; the previous clip rows and their files are replaced.
-    assert client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
     assert not first_render.exists(), "stale render should be removed on re-process"
 
 
-def test_render_honours_vertical_flag(client, sample_video):
+def test_render_honours_vertical_flag(auth_client, sample_video):
     from quickreel.media import ffmpeg
 
-    project = _create_and_upload(client, sample_video)
+    project = _create_and_upload(auth_client, sample_video)
     project_id = project["id"]
-    assert client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
 
     # Render the same clip in each orientation. The output path is derived from
     # the clip id, so probe straight away before the next render overwrites it.
-    vertical = client.post(
+    vertical = auth_client.post(
         f"/api/v1/projects/{project_id}/render",
         json={"max_clips": 1, "vertical": True},
     ).json()[0]
@@ -167,7 +173,7 @@ def test_render_honours_vertical_flag(client, sample_video):
     v_info = ffmpeg.probe(vertical["render_path"])
     assert (v_info.width, v_info.height) == (1080, 1920)
 
-    horizontal = client.post(
+    horizontal = auth_client.post(
         f"/api/v1/projects/{project_id}/render",
         json={"max_clips": 1, "vertical": False},
     ).json()[0]

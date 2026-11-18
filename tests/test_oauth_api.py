@@ -48,8 +48,18 @@ def _clean_publish_targets():
     yield
 
 
-def test_start_returns_a_consent_url(client):
-    response = client.get("/api/v1/oauth/tiktok/start")
+def _state(auth_client) -> str:
+    """A valid signed state for the signed-in workspace."""
+    return oauth.sign_state("tiktok", workspace_id=_workspace_id(auth_client))
+
+
+def _workspace_id(auth_client) -> str:
+    """The signed-in workspace, needed because OAuth state is signed with it."""
+    return auth_client.get("/api/v1/auth/me").json()["workspace"]["id"]
+
+
+def test_start_returns_a_consent_url(auth_client):
+    response = auth_client.get("/api/v1/oauth/tiktok/start")
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["platform"] == "tiktok"
@@ -57,20 +67,20 @@ def test_start_returns_a_consent_url(client):
     assert body["state"]
 
 
-def test_start_reports_an_unconfigured_platform_as_conflict(client, monkeypatch):
+def test_start_reports_an_unconfigured_platform_as_conflict(auth_client, monkeypatch):
     monkeypatch.setenv("QUICKREEL_TIKTOK_CLIENT_ID", "")
     get_settings.cache_clear()
-    response = client.get("/api/v1/oauth/tiktok/start")
+    response = auth_client.get("/api/v1/oauth/tiktok/start")
     assert response.status_code == 409
     assert "QUICKREEL_TIKTOK_CLIENT_ID" in response.json()["detail"]
 
 
-def test_start_rejects_an_unknown_platform(client):
-    assert client.get("/api/v1/oauth/myspace/start").status_code == 404
+def test_start_rejects_an_unknown_platform(auth_client):
+    assert auth_client.get("/api/v1/oauth/myspace/start").status_code == 404
 
 
-def test_providers_endpoint_reports_configuration_without_secrets(client):
-    body = client.get("/api/v1/oauth/providers").json()
+def test_providers_endpoint_reports_configuration_without_secrets(auth_client):
+    body = auth_client.get("/api/v1/oauth/providers").json()
     by_name = {p["platform"]: p for p in body["providers"]}
     assert by_name["tiktok"]["configured"] is True
     assert by_name["instagram_reels"]["configured"] is False
@@ -78,15 +88,15 @@ def test_providers_endpoint_reports_configuration_without_secrets(client):
     assert "client-123" not in str(body)
 
 
-def test_callback_without_state_redirects_back_with_a_reason(client):
-    response = client.get("/api/v1/oauth/tiktok/callback?code=abc", follow_redirects=False)
+def test_callback_without_state_redirects_back_with_a_reason(auth_client):
+    response = auth_client.get("/api/v1/oauth/tiktok/callback?code=abc", follow_redirects=False)
     assert response.status_code == 303
     assert "connected=error" in response.headers["location"]
 
 
-def test_callback_with_a_forged_state_is_refused(client):
-    response = client.get(
-        "/api/v1/oauth/tiktok/callback?code=abc&state=nonce.1.tiktok.AAAA",
+def test_callback_with_a_forged_state_is_refused(auth_client):
+    response = auth_client.get(
+        "/api/v1/oauth/tiktok/callback?code=abc&state=nonce.1.ws1.tiktok.AAAA",
         follow_redirects=False,
     )
     assert response.status_code == 303
@@ -95,10 +105,10 @@ def test_callback_with_a_forged_state_is_refused(client):
     assert "signature" in location
 
 
-def test_callback_with_a_state_for_another_platform_is_refused(client):
+def test_callback_with_a_state_for_another_platform_is_refused(auth_client):
     """A state issued for one platform must not work on another's callback."""
-    state = oauth.sign_state("instagram_reels")
-    response = client.get(
+    state = oauth.sign_state("instagram_reels", workspace_id=_workspace_id(auth_client))
+    response = auth_client.get(
         f"/api/v1/oauth/tiktok/callback?code=abc&state={state}",
         follow_redirects=False,
     )
@@ -106,9 +116,13 @@ def test_callback_with_a_state_for_another_platform_is_refused(client):
     assert "connected=error" in response.headers["location"]
 
 
-def test_callback_with_an_expired_state_is_refused(client):
-    state = oauth.sign_state("tiktok", now=time.time() - 7200)
-    response = client.get(
+def test_callback_with_an_expired_state_is_refused(auth_client):
+    state = oauth.sign_state(
+        "tiktok",
+        workspace_id=_workspace_id(auth_client),
+        now=time.time() - 7200
+    )
+    response = auth_client.get(
         f"/api/v1/oauth/tiktok/callback?code=abc&state={state}",
         follow_redirects=False,
     )
@@ -116,8 +130,8 @@ def test_callback_with_an_expired_state_is_refused(client):
     assert "expired" in response.headers["location"]
 
 
-def test_user_denial_redirects_with_the_platform_reason(client):
-    response = client.get(
+def test_user_denial_redirects_with_the_platform_reason(auth_client):
+    response = auth_client.get(
         "/api/v1/oauth/tiktok/callback?error=access_denied&error_description=User+said+no",
         follow_redirects=False,
     )
@@ -127,9 +141,9 @@ def test_user_denial_redirects_with_the_platform_reason(client):
     assert "User" in location
 
 
-def test_successful_callback_stores_the_target_and_never_leaks_tokens(client):
+def test_successful_callback_stores_the_target_and_never_leaks_tokens(auth_client):
     """The happy path, with the token exchange stubbed at the oauth seam."""
-    state = oauth.sign_state("tiktok")
+    state = oauth.sign_state("tiktok", workspace_id=_workspace_id(auth_client))
 
     def fake_exchange(platform: str, code: str) -> dict:
         assert platform == "tiktok"
@@ -148,7 +162,7 @@ def test_successful_callback_stores_the_target_and_never_leaks_tokens(client):
     original = oauth_routes.oauth.exchange_code
     oauth_routes.oauth.exchange_code = fake_exchange
     try:
-        response = client.get(
+        response = auth_client.get(
             f"/api/v1/oauth/tiktok/callback?code=auth-code&state={state}",
             follow_redirects=False,
         )
@@ -158,7 +172,7 @@ def test_successful_callback_stores_the_target_and_never_leaks_tokens(client):
     assert response.status_code == 303
     assert "connected=tiktok" in response.headers["location"]
 
-    listing = client.get("/api/v1/publish-targets")
+    listing = auth_client.get("/api/v1/publish-targets")
     targets = listing.json()
     assert len(targets) == 1
     assert targets[0]["external_account_id"] == "open-id-42"
@@ -171,7 +185,7 @@ def test_successful_callback_stores_the_target_and_never_leaks_tokens(client):
     assert "credentials" not in listing.text
 
 
-def test_reconnecting_updates_the_existing_target(client):
+def test_reconnecting_updates_the_existing_target(auth_client):
     """Re-authorising must not create a duplicate account row."""
 
     def exchange_with(token: str):
@@ -186,26 +200,26 @@ def test_reconnecting_updates_the_existing_target(client):
     original = oauth_routes.oauth.exchange_code
     try:
         oauth_routes.oauth.exchange_code = exchange_with("first-token")
-        client.get(
-            f"/api/v1/oauth/tiktok/callback?code=c&state={oauth.sign_state('tiktok')}",
+        auth_client.get(
+            f"/api/v1/oauth/tiktok/callback?code=c&state={_state(auth_client)}",
             follow_redirects=False,
         )
         oauth_routes.oauth.exchange_code = exchange_with("second-token")
-        client.get(
-            f"/api/v1/oauth/tiktok/callback?code=c&state={oauth.sign_state('tiktok')}",
+        auth_client.get(
+            f"/api/v1/oauth/tiktok/callback?code=c&state={_state(auth_client)}",
             follow_redirects=False,
         )
     finally:
         oauth_routes.oauth.exchange_code = original
 
-    targets = client.get("/api/v1/publish-targets").json()
+    targets = auth_client.get("/api/v1/publish-targets").json()
     assert len(targets) == 1
     assert targets[0]["external_account_id"] == "same-account"
 
 
-def test_reconnect_clears_a_needs_reauth_target(client):
+def test_reconnect_clears_a_needs_reauth_target(auth_client):
     """The reconnect prompt exists to fix this state, so reconnecting must clear it."""
-    created = client.post(
+    created = auth_client.post(
         "/api/v1/publish-targets",
         json={
             "platform": "tiktok",
@@ -238,15 +252,15 @@ def test_reconnect_clears_a_needs_reauth_target(client):
     original = oauth_routes.oauth.exchange_code
     oauth_routes.oauth.exchange_code = exchange
     try:
-        response = client.get(
-            f"/api/v1/oauth/tiktok/callback?code=c&state={oauth.sign_state('tiktok')}",
+        response = auth_client.get(
+            f"/api/v1/oauth/tiktok/callback?code=c&state={_state(auth_client)}",
             follow_redirects=False,
         )
     finally:
         oauth_routes.oauth.exchange_code = original
 
     assert response.status_code == 303
-    targets = client.get("/api/v1/publish-targets").json()
+    targets = auth_client.get("/api/v1/publish-targets").json()
     assert len(targets) == 1
     assert targets[0]["status"] == "active"
     assert targets[0]["status_detail"] == ""

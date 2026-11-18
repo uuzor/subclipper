@@ -42,6 +42,7 @@ def _request_for(subscription: ChannelSubscription) -> SubscriptionRequest:
 def create_subscription(
     session: Session,
     *,
+    workspace_id: str,
     channel_id: str,
     channel_title: str = "",
     authorized_by: str = "",
@@ -60,7 +61,10 @@ def create_subscription(
     hub = hub or default_hub_client()
 
     existing = session.scalars(
-        select(ChannelSubscription).where(ChannelSubscription.channel_id == channel_id)
+        select(ChannelSubscription).where(
+            ChannelSubscription.channel_id == channel_id,
+            ChannelSubscription.workspace_id == workspace_id,
+        )
     ).first()
     if existing is not None:
         # Re-subscribing is how a revoked channel is re-enabled, so treat it as
@@ -73,6 +77,7 @@ def create_subscription(
         subscription = existing
     else:
         subscription = ChannelSubscription(
+            workspace_id=workspace_id,
             channel_id=channel_id,
             channel_title=channel_title,
             authorized_by=authorized_by,
@@ -104,7 +109,11 @@ def create_subscription(
 
 
 def renew_due_subscriptions(
-    session: Session, *, now: datetime | None = None, hub: HubClient | None = None
+    session: Session,
+    *,
+    now: datetime | None = None,
+    hub: HubClient | None = None,
+    workspace_id: str | None = None,
 ) -> list[ChannelSubscription]:
     """Renew every active subscription whose lease is close to lapsing.
 
@@ -115,15 +124,14 @@ def renew_due_subscriptions(
     now = now or datetime.now(UTC)
     hub = hub or default_hub_client()
 
-    due = list(
-        session.scalars(
-            select(ChannelSubscription).where(
-                ChannelSubscription.status == SubscriptionStatus.active,
-                ChannelSubscription.lease_expires_at.is_not(None),
-                ChannelSubscription.lease_expires_at <= now,
-            )
-        ).all()
+    query = select(ChannelSubscription).where(
+        ChannelSubscription.status == SubscriptionStatus.active,
+        ChannelSubscription.lease_expires_at.is_not(None),
+        ChannelSubscription.lease_expires_at <= now,
     )
+    if workspace_id is not None:
+        query = query.where(ChannelSubscription.workspace_id == workspace_id)
+    due = list(session.scalars(query).all())
 
     renewed: list[ChannelSubscription] = []
     for subscription in due:

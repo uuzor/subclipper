@@ -10,20 +10,20 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 
-def _rendered_clip(client, sample_video: Path) -> str:
+def _rendered_clip(auth_client, sample_video: Path) -> str:
     """Run a project all the way to a rendered clip and return its id."""
-    created = client.post("/api/v1/projects", json={"title": "Podcast"})
+    created = auth_client.post("/api/v1/projects", json={"title": "Podcast"})
     project_id = created.json()["id"]
     with sample_video.open("rb") as handle:
-        client.post(
+        auth_client.post(
             f"/api/v1/projects/{project_id}/upload",
             files={"file": ("sample.mp4", handle, "video/mp4")},
         )
-    client.post(f"/api/v1/projects/{project_id}/process")
-    clips = client.get(f"/api/v1/projects/{project_id}/clips").json()
+    auth_client.post(f"/api/v1/projects/{project_id}/process")
+    clips = auth_client.get(f"/api/v1/projects/{project_id}/clips").json()
     assert clips, "pipeline should produce candidate clips"
     clip_id = clips[0]["id"]
-    rendered = client.post(
+    rendered = auth_client.post(
         f"/api/v1/projects/{project_id}/render",
         json={"clip_ids": [clip_id]},
     )
@@ -31,8 +31,8 @@ def _rendered_clip(client, sample_video: Path) -> str:
     return clip_id
 
 
-def _target(client, platform: str = "tiktok") -> str:
-    response = client.post(
+def _target(auth_client, platform: str = "tiktok") -> str:
+    response = auth_client.post(
         "/api/v1/publish-targets",
         json={"platform": platform, "display_name": "Test account"},
     )
@@ -40,22 +40,22 @@ def _target(client, platform: str = "tiktok") -> str:
     return response.json()["id"]
 
 
-def test_list_platforms_reports_adapter_availability(client):
-    body = client.get("/api/v1/platforms").json()
+def test_list_platforms_reports_adapter_availability(auth_client):
+    body = auth_client.get("/api/v1/platforms").json()
     names = {p["name"] for p in body["platforms"]}
     assert names == {"tiktok", "youtube_shorts", "instagram_reels"}
     # No live adapter ships yet, so every platform reports false.
     assert all(p["live_adapter_registered"] is False for p in body["platforms"])
 
 
-def test_create_target_rejects_unknown_platform(client):
-    response = client.post("/api/v1/publish-targets", json={"platform": "myspace"})
+def test_create_target_rejects_unknown_platform(auth_client):
+    response = auth_client.post("/api/v1/publish-targets", json={"platform": "myspace"})
     assert response.status_code == 422
     assert "unknown platform" in response.json()["detail"]
 
 
-def test_create_target_does_not_echo_credentials(client):
-    response = client.post(
+def test_create_target_does_not_echo_credentials(auth_client):
+    response = auth_client.post(
         "/api/v1/publish-targets",
         json={
             "platform": "tiktok",
@@ -69,19 +69,19 @@ def test_create_target_does_not_echo_credentials(client):
     assert "credentials" not in response.json()
 
 
-def test_schedule_rejects_unrendered_clip(client, sample_video):
-    created = client.post("/api/v1/projects", json={"title": "P"})
+def test_schedule_rejects_unrendered_clip(auth_client, sample_video):
+    created = auth_client.post("/api/v1/projects", json={"title": "P"})
     project_id = created.json()["id"]
     with sample_video.open("rb") as handle:
-        client.post(
+        auth_client.post(
             f"/api/v1/projects/{project_id}/upload",
             files={"file": ("sample.mp4", handle, "video/mp4")},
         )
-    client.post(f"/api/v1/projects/{project_id}/process")
-    clip_id = client.get(f"/api/v1/projects/{project_id}/clips").json()[0]["id"]
-    target_id = _target(client)
+    auth_client.post(f"/api/v1/projects/{project_id}/process")
+    clip_id = auth_client.get(f"/api/v1/projects/{project_id}/clips").json()[0]["id"]
+    target_id = _target(auth_client)
 
-    response = client.post(
+    response = auth_client.post(
         "/api/v1/scheduled-posts",
         json={
             "clip_id": clip_id,
@@ -93,11 +93,11 @@ def test_schedule_rejects_unrendered_clip(client, sample_video):
     assert "render it before scheduling" in response.json()["detail"]
 
 
-def test_schedule_and_publish_end_to_end(client, sample_video):
-    clip_id = _rendered_clip(client, sample_video)
-    target_id = _target(client)
+def test_schedule_and_publish_end_to_end(auth_client, sample_video):
+    clip_id = _rendered_clip(auth_client, sample_video)
+    target_id = _target(auth_client)
 
-    created = client.post(
+    created = auth_client.post(
         "/api/v1/scheduled-posts",
         json={
             "clip_id": clip_id,
@@ -110,26 +110,26 @@ def test_schedule_and_publish_end_to_end(client, sample_video):
     post_id = created.json()["id"]
     assert created.json()["status"] == "scheduled"
 
-    run = client.post("/api/v1/publishing/run-due")
+    run = auth_client.post("/api/v1/publishing/run-due")
     assert run.status_code == 200, run.text
     body = run.json()
     assert body["published"] == 1
     assert body["failed"] == 0
 
-    after = client.get(f"/api/v1/scheduled-posts/{post_id}").json()
+    after = auth_client.get(f"/api/v1/scheduled-posts/{post_id}").json()
     assert after["status"] == "published"
     assert after["external_post_id"]
     assert after["published_at"] is not None
 
-    attempts = client.get(f"/api/v1/scheduled-posts/{post_id}/attempts").json()
+    attempts = auth_client.get(f"/api/v1/scheduled-posts/{post_id}/attempts").json()
     assert len(attempts) == 1
     assert attempts[0]["ok"] is True
 
 
-def test_future_post_is_not_published(client, sample_video):
-    clip_id = _rendered_clip(client, sample_video)
-    target_id = _target(client)
-    client.post(
+def test_future_post_is_not_published(auth_client, sample_video):
+    clip_id = _rendered_clip(auth_client, sample_video)
+    target_id = _target(auth_client)
+    auth_client.post(
         "/api/v1/scheduled-posts",
         json={
             "clip_id": clip_id,
@@ -138,15 +138,15 @@ def test_future_post_is_not_published(client, sample_video):
         },
     )
 
-    run = client.post("/api/v1/publishing/run-due").json()
+    run = auth_client.post("/api/v1/publishing/run-due").json()
     assert run["examined"] == 0
     assert run["published"] == 0
 
 
-def test_publish_now_is_idempotent(client, sample_video):
-    clip_id = _rendered_clip(client, sample_video)
-    target_id = _target(client)
-    post_id = client.post(
+def test_publish_now_is_idempotent(auth_client, sample_video):
+    clip_id = _rendered_clip(auth_client, sample_video)
+    target_id = _target(auth_client)
+    post_id = auth_client.post(
         "/api/v1/scheduled-posts",
         json={
             "clip_id": clip_id,
@@ -155,19 +155,19 @@ def test_publish_now_is_idempotent(client, sample_video):
         },
     ).json()["id"]
 
-    first = client.post(f"/api/v1/scheduled-posts/{post_id}/publish-now")
+    first = auth_client.post(f"/api/v1/scheduled-posts/{post_id}/publish-now")
     assert first.status_code == 200, first.text
     assert first.json()["status"] == "published"
 
     # The claim guard means a second press cannot double-post.
-    second = client.post(f"/api/v1/scheduled-posts/{post_id}/publish-now")
+    second = auth_client.post(f"/api/v1/scheduled-posts/{post_id}/publish-now")
     assert second.status_code == 409
 
 
-def test_cancel_prevents_publication(client, sample_video):
-    clip_id = _rendered_clip(client, sample_video)
-    target_id = _target(client)
-    post_id = client.post(
+def test_cancel_prevents_publication(auth_client, sample_video):
+    clip_id = _rendered_clip(auth_client, sample_video)
+    target_id = _target(auth_client)
+    post_id = auth_client.post(
         "/api/v1/scheduled-posts",
         json={
             "clip_id": clip_id,
@@ -176,18 +176,18 @@ def test_cancel_prevents_publication(client, sample_video):
         },
     ).json()["id"]
 
-    canceled = client.post(f"/api/v1/scheduled-posts/{post_id}/cancel")
+    canceled = auth_client.post(f"/api/v1/scheduled-posts/{post_id}/cancel")
     assert canceled.status_code == 200
     assert canceled.json()["status"] == "canceled"
 
-    run = client.post("/api/v1/publishing/run-due").json()
+    run = auth_client.post("/api/v1/publishing/run-due").json()
     assert run["published"] == 0
 
 
-def test_cancel_rejects_already_published(client, sample_video):
-    clip_id = _rendered_clip(client, sample_video)
-    target_id = _target(client)
-    post_id = client.post(
+def test_cancel_rejects_already_published(auth_client, sample_video):
+    clip_id = _rendered_clip(auth_client, sample_video)
+    target_id = _target(auth_client)
+    post_id = auth_client.post(
         "/api/v1/scheduled-posts",
         json={
             "clip_id": clip_id,
@@ -195,16 +195,16 @@ def test_cancel_rejects_already_published(client, sample_video):
             "scheduled_for": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
         },
     ).json()["id"]
-    client.post(f"/api/v1/scheduled-posts/{post_id}/publish-now")
+    auth_client.post(f"/api/v1/scheduled-posts/{post_id}/publish-now")
 
-    response = client.post(f"/api/v1/scheduled-posts/{post_id}/cancel")
+    response = auth_client.post(f"/api/v1/scheduled-posts/{post_id}/cancel")
     assert response.status_code == 409
 
 
-def test_list_posts_filters_by_status(client, sample_video):
-    clip_id = _rendered_clip(client, sample_video)
-    target_id = _target(client)
-    post_id = client.post(
+def test_list_posts_filters_by_status(auth_client, sample_video):
+    clip_id = _rendered_clip(auth_client, sample_video)
+    target_id = _target(auth_client)
+    post_id = auth_client.post(
         "/api/v1/scheduled-posts",
         json={
             "clip_id": clip_id,
@@ -213,19 +213,23 @@ def test_list_posts_filters_by_status(client, sample_video):
         },
     ).json()["id"]
     # Scope to this clip: the database is shared across the module.
-    scheduled = client.get(f"/api/v1/scheduled-posts?status=scheduled&clip_id={clip_id}").json()
+    scheduled = auth_client.get(
+        f"/api/v1/scheduled-posts?status=scheduled&clip_id={clip_id}"
+    ).json()
     assert [p["id"] for p in scheduled] == [post_id]
-    published = client.get(f"/api/v1/scheduled-posts?status=published&clip_id={clip_id}").json()
+    published = auth_client.get(
+        f"/api/v1/scheduled-posts?status=published&clip_id={clip_id}"
+    ).json()
     assert published == []
 
-    bad = client.get("/api/v1/scheduled-posts?status=nonsense")
+    bad = auth_client.get("/api/v1/scheduled-posts?status=nonsense")
     assert bad.status_code == 422
 
 
-def test_delete_target_removes_its_posts(client, sample_video):
-    clip_id = _rendered_clip(client, sample_video)
-    target_id = _target(client)
-    post_id = client.post(
+def test_delete_target_removes_its_posts(auth_client, sample_video):
+    clip_id = _rendered_clip(auth_client, sample_video)
+    target_id = _target(auth_client)
+    post_id = auth_client.post(
         "/api/v1/scheduled-posts",
         json={
             "clip_id": clip_id,
@@ -233,16 +237,16 @@ def test_delete_target_removes_its_posts(client, sample_video):
             "scheduled_for": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
         },
     ).json()["id"]
-    assert client.delete(f"/api/v1/publish-targets/{target_id}").status_code == 204
+    assert auth_client.delete(f"/api/v1/publish-targets/{target_id}").status_code == 204
     # The cascade means the orphaned post is gone rather than left dangling.
-    assert client.get(f"/api/v1/scheduled-posts/{post_id}").status_code == 404
+    assert auth_client.get(f"/api/v1/scheduled-posts/{post_id}").status_code == 404
 
 
-def test_scheduled_post_out_reports_duration_free_shape(client, sample_video):
+def test_scheduled_post_out_reports_duration_free_shape(auth_client, sample_video):
     """Guard against a response model that fails validation on real rows."""
-    clip_id = _rendered_clip(client, sample_video)
-    target_id = _target(client)
-    created = client.post(
+    clip_id = _rendered_clip(auth_client, sample_video)
+    target_id = _target(auth_client)
+    created = auth_client.post(
         "/api/v1/scheduled-posts",
         json={
             "clip_id": clip_id,
@@ -256,9 +260,9 @@ def test_scheduled_post_out_reports_duration_free_shape(client, sample_video):
     assert isinstance(body["created_at"], str)
 
 
-def test_provenance_round_trips_on_a_project(client):
+def test_provenance_round_trips_on_a_project(auth_client):
     """Provenance is a selling point, so it has to be readable, not just stored."""
-    created = client.post(
+    created = auth_client.post(
         "/api/v1/projects",
         json={
             "title": "Client podcast",
@@ -271,12 +275,12 @@ def test_provenance_round_trips_on_a_project(client):
     assert body["authorized_by"] == "producer@example.com"
     assert "Clipping rights granted" in body["license_note"]
 
-    fetched = client.get(f"/api/v1/projects/{body['id']}").json()
+    fetched = auth_client.get(f"/api/v1/projects/{body['id']}").json()
     assert fetched["authorized_by"] == "producer@example.com"
 
 
-def test_provenance_defaults_to_empty(client):
-    created = client.post("/api/v1/projects", json={"title": "No license recorded"})
+def test_provenance_defaults_to_empty(auth_client):
+    created = auth_client.post("/api/v1/projects", json={"title": "No license recorded"})
     body = created.json()
     assert body["license_note"] == ""
     assert body["authorized_by"] == ""

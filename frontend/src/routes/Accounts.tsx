@@ -8,6 +8,7 @@ import type {
   ScheduledPost,
 } from "../lib/types";
 import { IconArrow, IconCheck, IconSpinner, IconWarn } from "../components/icons";
+import PasswordPanel from "../components/PasswordPanel";
 import { platformLabel, postStatusLabel } from "../lib/publishing";
 import "./accounts.css";
 
@@ -247,6 +248,8 @@ export default function Accounts() {
           </table>
         )}
       </section>
+
+      <PasswordPanel />
     </div>
   );
 }

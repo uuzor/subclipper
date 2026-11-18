@@ -119,31 +119,38 @@ def _secret() -> bytes:
     return b"quickreel-dev-only-oauth-state"
 
 
-def sign_state(platform: str, *, now: float | None = None) -> str:
-    """Build a signed ``state`` value binding this flow to a platform and time.
+def sign_state(platform: str, *, workspace_id: str, now: float | None = None) -> str:
+    """Build a signed ``state`` value binding this flow to a platform, tenant and time.
 
-    Format: ``<nonce>.<issued_at>.<hmac>``. The nonce makes each flow unique;
-    the timestamp bounds its life; the HMAC is what makes the callback able to
-    trust that this server issued it.
+    Format: ``<nonce>.<issued_at>.<workspace_id>.<platform>.<hmac>``. The nonce
+    makes each flow unique; the timestamp bounds its life; the workspace id is
+    what decides which tenant the connected account is filed under; the HMAC is
+    what makes the callback able to trust all of it.
+
+    The workspace travels in the state rather than being read from the session
+    cookie on the way back, because the callback is a cross-site redirect and
+    the cookie's presence there is a browser policy detail, not a guarantee. A
+    signed value that the server itself issued cannot be forged, so the account
+    can never be attached to a tenant the user did not start the flow in.
     """
     nonce = secrets.token_urlsafe(16)
     issued_at = int(now if now is not None else time.time())
-    payload = f"{nonce}.{issued_at}.{platform}"
+    payload = f"{nonce}.{issued_at}.{workspace_id}.{platform}"
     signature = hmac.new(_secret(), payload.encode("utf-8"), hashlib.sha256).digest()
     return f"{payload}.{_b64encode(signature)}"
 
 
-def verify_state(state: str, *, now: float | None = None) -> str:
-    """Validate a returned ``state`` and return the platform it was issued for.
+def verify_state(state: str, *, now: float | None = None) -> tuple[str, str]:
+    """Validate a returned ``state``; return ``(platform, workspace_id)``.
 
     Raises :class:`OAuthError` on anything suspicious. Constant-time comparison
     so a wrong signature cannot be found byte by byte.
     """
     parts = state.split(".")
-    if len(parts) != 4:
+    if len(parts) != 5:
         raise OAuthError("malformed OAuth state")
-    nonce, issued_raw, platform, signature = parts
-    payload = f"{nonce}.{issued_raw}.{platform}"
+    nonce, issued_raw, workspace_id, platform, signature = parts
+    payload = f"{nonce}.{issued_raw}.{workspace_id}.{platform}"
     expected = _b64encode(hmac.new(_secret(), payload.encode("utf-8"), hashlib.sha256).digest())
     if not hmac.compare_digest(expected, signature):
         raise OAuthError("OAuth state signature does not match")
@@ -157,7 +164,7 @@ def verify_state(state: str, *, now: float | None = None) -> str:
         raise OAuthError("OAuth state has expired; restart the connect flow")
     if age < -60:
         raise OAuthError("OAuth state is dated in the future")
-    return platform
+    return platform, workspace_id
 
 
 def redirect_uri(platform: str) -> str:
@@ -171,10 +178,10 @@ def redirect_uri(platform: str) -> str:
     return f"{base}/api/v1/oauth/{platform}/callback"
 
 
-def authorization_url(platform: str) -> tuple[str, str]:
+def authorization_url(platform: str, *, workspace_id: str) -> tuple[str, str]:
     """Return ``(url, state)`` for the user to be sent to."""
     provider = provider_for(platform)
-    state = sign_state(platform)
+    state = sign_state(platform, workspace_id=workspace_id)
     params = {
         "client_id": _client_id(platform),
         "redirect_uri": redirect_uri(platform),

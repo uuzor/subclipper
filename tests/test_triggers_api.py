@@ -60,14 +60,14 @@ def _clean_trigger_rows():
     yield
 
 
-def test_hub_info_reports_the_callback_url(client):
-    body = client.get("/api/v1/triggers/youtube/hub").json()
+def test_hub_info_reports_the_callback_url(auth_client):
+    body = auth_client.get("/api/v1/triggers/youtube/hub").json()
     assert body["callback_url"].endswith("/api/v1/triggers/youtube/notify")
     assert body["client"] == "mock"
 
 
-def test_subscribe_creates_an_active_subscription(client):
-    response = client.post(
+def test_subscribe_creates_an_active_subscription(auth_client):
+    response = auth_client.post(
         "/api/v1/triggers/youtube/subscriptions",
         json={"channel_id": CHANNEL, "channel_title": "Some Channel", "authorized_by": "owner"},
     )
@@ -77,15 +77,15 @@ def test_subscribe_creates_an_active_subscription(client):
     assert body["channel_id"] == CHANNEL
 
 
-def test_subscribe_rejects_a_malformed_channel_id(client):
-    response = client.post(
+def test_subscribe_rejects_a_malformed_channel_id(auth_client):
+    response = auth_client.post(
         "/api/v1/triggers/youtube/subscriptions", json={"channel_id": "not-a-channel"}
     )
     assert response.status_code == 422
 
 
-def test_verification_echoes_the_challenge(client):
-    response = client.get(
+def test_verification_echoes_the_challenge(auth_client):
+    response = auth_client.get(
         "/api/v1/triggers/youtube/notify",
         params={"hub.mode": "subscribe", "hub.challenge": "abc123", "hub.topic": "t"},
     )
@@ -93,12 +93,12 @@ def test_verification_echoes_the_challenge(client):
     assert response.text == "abc123"
 
 
-def test_verification_without_a_challenge_is_a_bad_request(client):
-    response = client.get("/api/v1/triggers/youtube/notify", params={"hub.mode": "subscribe"})
+def test_verification_without_a_challenge_is_a_bad_request(auth_client):
+    response = auth_client.get("/api/v1/triggers/youtube/notify", params={"hub.mode": "subscribe"})
     assert response.status_code == 400
 
 
-def test_notification_for_a_subscribed_channel_creates_a_project(client, monkeypatch):
+def test_notification_for_a_subscribed_channel_creates_a_project(auth_client, monkeypatch):
     """The full path: subscribe, then a hub notification, then a project."""
     from quickreel.triggers import hub as hub_module
 
@@ -114,65 +114,84 @@ def test_notification_for_a_subscribed_channel_creates_a_project(client, monkeyp
     )
     assert hub_module is not None  # imported for clarity
 
-    client.post(
+    auth_client.post(
         "/api/v1/triggers/youtube/subscriptions",
         json={"channel_id": CHANNEL, "authorized_by": "owner"},
     )
 
-    response = client.post(
+    response = auth_client.post(
         "/api/v1/triggers/youtube/notify",
         content=_feed(),
         headers={"Content-Type": "application/atom+xml"},
     )
     assert response.status_code == 204
 
-    events = client.get("/api/v1/triggers/youtube/events").json()
+    events = auth_client.get("/api/v1/triggers/youtube/events").json()
     assert len(events) == 1
     assert events[0]["status"] == "queued"
     assert events[0]["project_id"]
 
 
-def test_notification_for_an_unsubscribed_channel_is_recorded_but_ignored(client):
-    response = client.post(
+def test_notification_for_an_unsubscribed_channel_is_recorded_but_ignored(auth_client):
+    response = auth_client.post(
         "/api/v1/triggers/youtube/notify",
         content=_feed(channel_id="UC1234567890123456789012"),
     )
     # Still 204: the hub cannot fix this by retrying.
     assert response.status_code == 204
-    events = client.get("/api/v1/triggers/youtube/events").json()
-    assert events[0]["status"] == "ignored"
+
+    # The event is recorded, but it has no subscription and therefore no
+    # workspace, so it is not returned to anyone: the events listing is scoped
+    # through the subscription. The row still exists for an operator to inspect.
+    from sqlalchemy import select
+
+    from quickreel.db import get_sessionmaker
+    from quickreel.models import YouTubeEvent
+
+    session = get_sessionmaker()()
+    try:
+        stored = session.scalars(select(YouTubeEvent)).all()
+    finally:
+        session.close()
+    assert len(stored) == 1
+    assert str(stored[0].status) == "ignored"
+    assert stored[0].subscription_id is None
+
+    assert auth_client.get("/api/v1/triggers/youtube/events").json() == []
 
 
-def test_a_malformed_notification_is_accepted_and_logged(client):
-    response = client.post("/api/v1/triggers/youtube/notify", content=b"not xml")
+def test_a_malformed_notification_is_accepted_and_logged(auth_client):
+    response = auth_client.post("/api/v1/triggers/youtube/notify", content=b"not xml")
     assert response.status_code == 204
     # Nothing was recorded, because nothing could be parsed.
-    assert client.get("/api/v1/triggers/youtube/events").json() == []
+    assert auth_client.get("/api/v1/triggers/youtube/events").json() == []
 
 
-def test_a_configured_secret_is_required_on_the_callback(client, monkeypatch):
+def test_a_configured_secret_is_required_on_the_callback(auth_client, monkeypatch):
     monkeypatch.setenv("QUICKREEL_YOUTUBE_CALLBACK_SECRET", "s3cret")
     get_settings.cache_clear()
 
     # Without the secret: not found.
-    assert client.post("/api/v1/triggers/youtube/notify", content=_feed()).status_code == 404
+    assert auth_client.post("/api/v1/triggers/youtube/notify", content=_feed()).status_code == 404
     # With the wrong secret: not found.
-    assert client.post("/api/v1/triggers/youtube/notify/guess", content=_feed()).status_code == 404
+    guessed = auth_client.post("/api/v1/triggers/youtube/notify/guess", content=_feed())
+    assert guessed.status_code == 404
     # With the right secret: accepted.
-    assert client.post("/api/v1/triggers/youtube/notify/s3cret", content=_feed()).status_code == 204
+    accepted = auth_client.post("/api/v1/triggers/youtube/notify/s3cret", content=_feed())
+    assert accepted.status_code == 204
 
 
-def test_a_configured_signing_secret_is_enforced(client, monkeypatch):
+def test_a_configured_signing_secret_is_enforced(auth_client, monkeypatch):
     monkeypatch.setenv("QUICKREEL_YOUTUBE_SIGNING_SECRET", "signing-key")
     get_settings.cache_clear()
 
     body = _feed()
     # Missing signature is refused.
-    assert client.post("/api/v1/triggers/youtube/notify", content=body).status_code == 403
+    assert auth_client.post("/api/v1/triggers/youtube/notify", content=body).status_code == 403
 
     # A correct signature is accepted.
     signature = "sha1=" + hmac.new(b"signing-key", body, hashlib.sha1).hexdigest()
-    response = client.post(
+    response = auth_client.post(
         "/api/v1/triggers/youtube/notify",
         content=body,
         headers={"X-Hub-Signature": signature},
@@ -180,17 +199,20 @@ def test_a_configured_signing_secret_is_enforced(client, monkeypatch):
     assert response.status_code == 204
 
 
-def test_delete_subscription_revokes_it(client):
-    created = client.post("/api/v1/triggers/youtube/subscriptions", json={"channel_id": CHANNEL})
+def test_delete_subscription_revokes_it(auth_client):
+    created = auth_client.post(
+        "/api/v1/triggers/youtube/subscriptions",
+        json={"channel_id": CHANNEL}
+    )
     subscription_id = created.json()["id"]
-    deleted = client.delete(f"/api/v1/triggers/youtube/subscriptions/{subscription_id}")
+    deleted = auth_client.delete(f"/api/v1/triggers/youtube/subscriptions/{subscription_id}")
     assert deleted.status_code == 204
-    listing = client.get("/api/v1/triggers/youtube/subscriptions").json()
+    listing = auth_client.get("/api/v1/triggers/youtube/subscriptions").json()
     assert listing[0]["status"] == "revoked"
 
 
-def test_renew_endpoint_reports_what_it_renewed(client):
-    client.post("/api/v1/triggers/youtube/subscriptions", json={"channel_id": CHANNEL})
+def test_renew_endpoint_reports_what_it_renewed(auth_client):
+    auth_client.post("/api/v1/triggers/youtube/subscriptions", json={"channel_id": CHANNEL})
     # A fresh lease is not due, so nothing is renewed yet.
-    body = client.post("/api/v1/triggers/youtube/subscriptions/renew").json()
+    body = auth_client.post("/api/v1/triggers/youtube/subscriptions/renew").json()
     assert body["renewed"] == 0

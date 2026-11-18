@@ -59,6 +59,19 @@ make run              # http://localhost:12000/docs
 make serve            # one process: API + built frontend, http://localhost:12000
 ```
 
+The API is behind email + password authentication. Open `http://localhost:12000`
+and create an account, or use the API directly: sign up, keep the session
+cookie, and send it with every later call.
+
+```bash
+curl -s -c /tmp/qr.jar -X POST localhost:12000/api/v1/auth/signup \
+  -H 'content-type: application/json' \
+  -d '{"email":"you@example.com","password":"a-good-password","workspace_name":"My studio"}'
+
+curl -s -b /tmp/qr.jar localhost:12000/api/v1/auth/me
+curl -s -b /tmp/qr.jar -X POST localhost:12000/api/v1/auth/logout
+```
+
 The default configuration uses deterministic fake AI providers and eager task
 execution, so the whole pipeline runs locally with no credentials and no broker.
 Swap in real providers by setting `QUICKREEL_TRANSCRIPTION_PROVIDER`,
@@ -432,10 +445,25 @@ third-party videos.
 - ffmpeg is invoked with argument lists, never shell strings.
 - No secrets are stored in code; all credentials come from the environment.
 - Error messages are sanitised before reaching the API response.
+- Passwords are hashed with scrypt (memory-hard, parameters stored in the hash
+  so they can be raised later); session tokens are random and stored only as a
+  SHA-256, so a database leak does not yield live sessions.
+- Login answers identically for an unknown address and a wrong password, and
+  spends the same time on both, so it cannot be used to enumerate accounts.
+  Failed attempts are throttled per address and per client.
+- The session cookie is `HttpOnly` and `SameSite=Lax`; the API requires a JSON
+  body, which a cross-site HTML form cannot produce, so the two together stand
+  in for a CSRF token. `Secure` is set whenever `QUICKREEL_PUBLIC_BASE_URL` is
+  HTTPS, which the production guard requires.
+- Every content route is scoped to the caller's workspace. Scoped lookups take
+  the workspace id as a required argument, so a query cannot be written without
+  it, and another tenant's row is a 404 rather than a 403 — the API does not
+  confirm which ids exist.
 - Platform credentials (`PublishTarget.credentials`) are never serialised back
-  out through the API. They are stored unencrypted today; encrypt them at rest
-  before running multi-tenant. Use least-privilege OAuth scopes: quickreel needs
-  permission to publish, not to read a creator's private analytics or messages.
+  out through the API, and each target belongs to a workspace. They are stored
+  unencrypted today; encrypt them at rest before handling other people's
+  accounts. Use least-privilege OAuth scopes: quickreel needs permission to
+  publish, not to read a creator's private analytics or messages.
 - Source URLs pass an SSRF guard: scheme allowlist, optional host allowlist, and
   a DNS check that refuses any non-globally-routable address. The check is
   repeated inside the pipeline, immediately before the download.

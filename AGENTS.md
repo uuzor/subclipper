@@ -269,6 +269,72 @@ rather than at third-party videos. Provenance (`license_note`, `authorized_by`
 on `Project`) is recorded so a clip can always answer on what basis it may be
 republished.
 
+## Authentication and tenancy
+
+Email and password only. Every account belongs to at least one workspace, and
+every piece of content belongs to a workspace. There is no way to read or write
+content without a session and a workspace.
+
+The pieces:
+
+- `auth.py` — password hashing (scrypt, parameters stored in the hash), session
+  token generation/hashing, and the in-process `LoginThrottle`. No DB, no HTTP.
+- `auth_service.py` — users, workspaces, memberships, sessions. The policy layer;
+  reachable from a test or a script without going through HTTP.
+- `api/deps.py` — `current_principal`, `current_workspace`, `require_owner`, the
+  cookie helpers, and the scoped-lookup helpers.
+- `api/routes/auth.py` — signup, login, logout, `/me`, workspace switch,
+  password change. The only routes reachable with no session (plus health and
+  the WebSub callback).
+
+Invariants worth keeping:
+
+1. **The workspace is a required argument, never looked up.** Scoped helpers
+   (`get_scoped_project`, `scoped_or_404`) take `workspace_id` as a positional
+   requirement, so a handler cannot forget to filter — the query cannot be
+   written without it. A row in another tenant and a row that does not exist both
+   return 404, so the API is not an oracle for which ids are real.
+2. **Sessions are rows, not signed tokens.** Logout and revocation have to
+   actually work, and a JWT cannot be un-issued. Only the SHA-256 of the token is
+   stored, so a database leak does not hand over live sessions. A password change
+   deletes every session for the user, including the one making the request.
+3. **Login cannot be used to enumerate accounts.** A missing account and a wrong
+   password return the same status and the same message, and the missing-account
+   path verifies against a dummy hash so it costs the same time. Signup is the
+   one unavoidable exception (it has to say an address is taken).
+4. **The cookie is the session; there is no bearer token.** `HttpOnly` keeps it
+   from JavaScript, `SameSite=Lax` keeps it off cross-site POSTs, and the API
+   requires a JSON body that a cross-site HTML form cannot produce. Together
+   those stand in for a CSRF token. `Secure` is set whenever the public origin is
+   HTTPS — in production the config guard requires an HTTPS `public_base_url`, so
+   it is always on there.
+5. **OAuth state carries the workspace.** The callback is a cross-site redirect
+   with no session cookie, so the tenant it files the account under is the one
+   the server signed into the state (`<nonce>.<issued>.<workspace>.<platform>.<hmac>`),
+   never one supplied by the request.
+
+### Tests and the session cookie
+
+`tests/conftest.py` provides two authenticated clients, because the content
+routes now 401 without a session:
+
+- `client` — no session. Use it for the public routes and to assert that
+  something is refused.
+- `auth_client` — a signed-up user. This is the default for content tests.
+- `second_auth_client` — a second user in a separate workspace, for isolation
+  tests (one tenant must not see the other's rows).
+
+Two traps that cost time to find:
+
+- **The test clients use `base_url="https://testserver"`.** A `Secure` cookie is
+  not sent over `http://`, so with the default `http://testserver` every
+  authenticated test fails with a 401 that has nothing to do with what it tests.
+- **The test database persists between runs** (`tests/.tmp/test.db`). Fixed
+  emails and fixed ids therefore collide on the second run (a 409 from signup, a
+  UNIQUE violation on a literal id). `tests/test_auth.py` mints a unique address
+  per test through the `mail` fixture; do the same rather than hardcoding one.
+  Delete `tests/.tmp/test.db` to test a fresh-database path.
+
 ## Database schema changes
 
 There is no migration framework. `Base.metadata.create_all` never alters an

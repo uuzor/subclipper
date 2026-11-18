@@ -57,6 +57,68 @@ def init_db() -> None:
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
     _add_missing_columns(engine)
+    _backfill_workspaces(engine)
+
+
+def _backfill_workspaces(engine: Engine) -> None:
+    """Give pre-tenancy rows a workspace.
+
+    Tenancy was added after the content tables existed, so rows written before it
+    have a NULL ``workspace_id``. Left alone they would be invisible to every
+    scoped query — not deleted, but unreachable, which is worse because it looks
+    like data loss. They are adopted into a single deterministic "legacy"
+    workspace instead, so an operator can see them and move them deliberately.
+
+    Runs only when there is something to adopt, so a fresh database does no work.
+    """
+    from sqlalchemy import text
+
+    from . import auth_service
+
+    scoped_tables = ("projects", "publish_targets", "channel_subscriptions")
+    with engine.begin() as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")
+            ).all()
+        }
+        if not tables:
+            # Not SQLite. Use the inspector, which works on both backends.
+            from sqlalchemy import inspect
+
+            tables = set(inspect(engine).get_table_names())
+
+        pending: dict[str, int] = {}
+        for table in scoped_tables:
+            if table not in tables:
+                continue
+            count = connection.execute(
+                text(f'SELECT COUNT(*) FROM "{table}" WHERE workspace_id IS NULL')
+            ).scalar()
+            if count:
+                pending[table] = int(count)
+
+    if not pending:
+        return
+
+    session = get_sessionmaker()()
+    try:
+        workspace = auth_service.ensure_legacy_workspace(session)
+        for table in pending:
+            session.execute(
+                text(f'UPDATE "{table}" SET workspace_id = :wid WHERE workspace_id IS NULL'),
+                {"wid": workspace.id},
+            )
+        session.commit()
+        logger.warning(
+            "db.backfilled_workspaces",
+            workspace_id=workspace.id,
+            adopted=pending,
+            detail="rows predating tenancy were adopted into the legacy workspace",
+        )
+    finally:
+        session.close()
 
 
 def _add_missing_columns(engine: Engine) -> None:

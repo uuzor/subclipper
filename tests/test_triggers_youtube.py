@@ -69,9 +69,35 @@ def _notification(video_id: str = VIDEO, channel_id: str = CHANNEL) -> Notificat
     )
 
 
+def _workspace(db_session):
+    """A tenant to own the subscriptions these tests create.
+
+    Tenancy is part of the contract now, so every subscription needs one. A
+    single shared workspace per test keeps the assertions focused on trigger
+    behaviour rather than on tenant bookkeeping.
+    """
+    from sqlalchemy import select
+
+    from quickreel.models import Workspace
+
+    existing = db_session.scalars(select(Workspace)).first()
+    if existing is not None:
+        return existing
+    workspace = Workspace(name="Trigger test workspace")
+    db_session.add(workspace)
+    db_session.commit()
+    return workspace
+
+
+def subscribe(db_session, **kwargs):
+    """``create_subscription`` with a workspace filled in."""
+    kwargs.setdefault("workspace_id", _workspace(db_session).id)
+    return create_subscription(db_session, **kwargs)
+
+
 def test_create_subscription_records_the_lease(db_session):
     hub = MockHubClient(lease_seconds=3600)
-    subscription = create_subscription(
+    subscription = subscribe(
         db_session,
         channel_id=CHANNEL,
         channel_title="Some Channel",
@@ -88,22 +114,22 @@ def test_create_subscription_records_the_lease(db_session):
 
 def test_create_subscription_marks_pending_when_the_hub_rejects(db_session):
     hub = MockHubClient(status_code=403)
-    subscription = create_subscription(db_session, channel_id=CHANNEL, hub=hub)
+    subscription = subscribe(db_session, channel_id=CHANNEL, hub=hub)
     assert subscription.status == SubscriptionStatus.pending
     assert subscription.status_detail
 
 
 def test_resubscribing_updates_rather_than_duplicates(db_session):
     hub = MockHubClient()
-    create_subscription(db_session, channel_id=CHANNEL, authorized_by="first", hub=hub)
-    second = create_subscription(db_session, channel_id=CHANNEL, authorized_by="second", hub=hub)
+    subscribe(db_session, channel_id=CHANNEL, authorized_by="first", hub=hub)
+    second = subscribe(db_session, channel_id=CHANNEL, authorized_by="second", hub=hub)
     assert db_session.query(ChannelSubscription).count() == 1
     assert second.authorized_by == "second"
 
 
 def test_renewal_only_touches_due_leases(db_session):
     hub = MockHubClient(lease_seconds=100)
-    subscription = create_subscription(db_session, channel_id=CHANNEL, hub=hub)
+    subscription = subscribe(db_session, channel_id=CHANNEL, hub=hub)
 
     # Not yet due.
     assert renew_due_subscriptions(db_session, hub=hub) == []
@@ -119,7 +145,7 @@ def test_renewal_only_touches_due_leases(db_session):
 
 def test_a_failed_renewal_marks_the_subscription_expired(db_session):
     hub = MockHubClient()
-    subscription = create_subscription(db_session, channel_id=CHANNEL, hub=hub)
+    subscription = subscribe(db_session, channel_id=CHANNEL, hub=hub)
     subscription.lease_expires_at = datetime.now(UTC) - timedelta(minutes=1)
     db_session.commit()
 
@@ -132,7 +158,7 @@ def test_a_failed_renewal_marks_the_subscription_expired(db_session):
 def test_revoke_sets_status_even_when_the_hub_fails(db_session):
     """A hub we cannot reach must not keep us processing the channel."""
     hub = MockHubClient()
-    subscription = create_subscription(db_session, channel_id=CHANNEL, hub=hub)
+    subscription = subscribe(db_session, channel_id=CHANNEL, hub=hub)
 
     class _BrokenHub(MockHubClient):
         def unsubscribe(self, request):
@@ -161,7 +187,7 @@ def test_notification_for_an_unknown_channel_is_ignored(db_session):
 
 
 def test_notification_creates_a_project_for_review(db_session):
-    create_subscription(db_session, channel_id=CHANNEL, hub=MockHubClient())
+    subscribe(db_session, channel_id=CHANNEL, hub=MockHubClient())
     decision = handle_notification(
         db_session, _notification(), probe=lambda url: _ProbeInfo(duration=3600)
     )
@@ -178,7 +204,7 @@ def test_notification_creates_a_project_for_review(db_session):
 
 
 def test_provenance_flows_from_subscription_to_project(db_session):
-    create_subscription(
+    subscribe(
         db_session,
         channel_id=CHANNEL,
         authorized_by="owner@example.com",
@@ -202,7 +228,7 @@ def test_review_is_the_default_and_processing_is_opt_in(db_session):
     the cheap path. This asserts the decision reason distinguishes the two, so
     an operator can tell from the event log which mode a video was ingested in.
     """
-    create_subscription(db_session, channel_id=CHANNEL, hub=MockHubClient())
+    subscribe(db_session, channel_id=CHANNEL, hub=MockHubClient())
     decision = handle_notification(
         db_session, _notification(), probe=lambda url: _ProbeInfo(duration=3600)
     )
@@ -213,7 +239,7 @@ def test_auto_process_on_the_subscription_queues_processing(db_session):
     """With auto_process set, the project is dispatched to the pipeline."""
     from quickreel.triggers.youtube import handle_notification as handle
 
-    create_subscription(db_session, channel_id=CHANNEL, auto_process=True, hub=MockHubClient())
+    subscribe(db_session, channel_id=CHANNEL, auto_process=True, hub=MockHubClient())
     dispatched: list[str] = []
 
     # Stub the enqueue seam rather than let a real task run: the point is that
@@ -233,7 +259,7 @@ def test_auto_process_on_the_subscription_queues_processing(db_session):
 
 def test_a_duplicate_notification_does_not_create_a_second_project(db_session):
     """WebSub permits duplicate delivery, so this is the common case, not an edge."""
-    create_subscription(db_session, channel_id=CHANNEL, hub=MockHubClient())
+    subscribe(db_session, channel_id=CHANNEL, hub=MockHubClient())
     first = handle_notification(
         db_session, _notification(), probe=lambda url: _ProbeInfo(duration=3600)
     )
@@ -249,14 +275,14 @@ def test_a_duplicate_notification_does_not_create_a_second_project(db_session):
 
 
 def test_a_short_video_is_ignored(db_session):
-    create_subscription(db_session, channel_id=CHANNEL, hub=MockHubClient())
+    subscribe(db_session, channel_id=CHANNEL, hub=MockHubClient())
     decision = handle_notification(db_session, _notification(), probe=lambda url: _ProbeInfo(30))
     assert decision.status == YouTubeEventStatus.ignored
     assert "shorter" in decision.reason
 
 
 def test_a_short_is_ignored(db_session):
-    create_subscription(db_session, channel_id=CHANNEL, hub=MockHubClient())
+    subscribe(db_session, channel_id=CHANNEL, hub=MockHubClient())
     decision = handle_notification(
         db_session,
         _notification(),
@@ -269,7 +295,7 @@ def test_a_probe_failure_is_recorded_not_raised(db_session):
     """One unavailable video must not take down the callback."""
     from quickreel.media.downloader import DownloadError
 
-    create_subscription(db_session, channel_id=CHANNEL, hub=MockHubClient())
+    subscribe(db_session, channel_id=CHANNEL, hub=MockHubClient())
 
     def failing_probe(url):
         raise DownloadError("video is private")
@@ -281,7 +307,7 @@ def test_a_probe_failure_is_recorded_not_raised(db_session):
 
 def test_a_revoked_subscription_stops_ingesting(db_session):
     hub = MockHubClient()
-    subscription = create_subscription(db_session, channel_id=CHANNEL, hub=hub)
+    subscription = subscribe(db_session, channel_id=CHANNEL, hub=hub)
     revoke_subscription(db_session, subscription, hub=hub)
 
     decision = handle_notification(

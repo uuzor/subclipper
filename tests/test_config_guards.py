@@ -34,6 +34,7 @@ def _production(**overrides) -> Settings:
         "publishing_mode": "live",
         "oauth_state_secret": "s3cret",
         "youtube_callback_secret": "callback-secret",
+        "public_base_url": "https://clipviralmoment.com",
     }
     base.update(overrides)
     return _settings(**base)

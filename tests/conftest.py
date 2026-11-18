@@ -110,6 +110,7 @@ def sample_video(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def client(settings):
+    """An unauthenticated client. For auth itself and for 401 assertions."""
     from fastapi.testclient import TestClient
 
     from quickreel.db import init_db, reset_engine
@@ -117,9 +118,72 @@ def client(settings):
 
     reset_engine()
     init_db()
-    with TestClient(create_app()) as test_client:
+    # An https base URL so that a Secure session cookie is actually sent back.
+    # httpx will not attach a Secure cookie over http, which would make every
+    # authenticated test fail for a reason unrelated to what it is testing.
+    with TestClient(create_app(), base_url="https://testserver") as test_client:
         yield test_client
     reset_engine()
+
+
+# Credentials for the signed-in fixture. The email is unique per test so that a
+# persistent test database does not turn the second run into a 409.
+AUTH_PASSWORD = "correct-horse-battery"
+
+
+@pytest.fixture()
+def auth_client(client):
+    """A client with a signed-up, logged-in user.
+
+    Content endpoints require a session, so tests that exercise them need an
+    account. Signing up through the real endpoint rather than inserting a user
+    directly keeps the tests honest: if signup or login breaks, every test that
+    uses this fixture fails, instead of the suite passing while the front door
+    is broken.
+    """
+    import uuid
+
+    from quickreel import auth
+
+    auth.login_throttle.reset()
+    email = f"creator-{uuid.uuid4().hex[:12]}@example.com"
+    response = client.post(
+        "/api/v1/auth/signup",
+        json={"email": email, "password": AUTH_PASSWORD, "workspace_name": "Test workspace"},
+    )
+    assert response.status_code == 201, response.text
+    client.auth_email = email
+    return client
+
+
+@pytest.fixture()
+def second_auth_client(client):
+    """A second, independent signed-in user in their own workspace.
+
+    Used to prove tenant isolation: two accounts, two workspaces, and no way for
+    one to see or touch the other's content. It reuses the engine the ``client``
+    fixture set up rather than resetting it, so both clients see the same
+    database while keeping separate cookie jars.
+    """
+    import uuid
+
+    from fastapi.testclient import TestClient
+
+    from quickreel import auth
+    from quickreel.main import create_app
+
+    auth.login_throttle.reset()
+    with TestClient(create_app(), base_url="https://testserver") as other:
+        response = other.post(
+            "/api/v1/auth/signup",
+            json={
+                "email": f"other-{uuid.uuid4().hex[:12]}@example.com",
+                "password": "another-correct-horse",
+                "workspace_name": "Other workspace",
+            },
+        )
+        assert response.status_code == 201, response.text
+        yield other
 
 
 @pytest.fixture()
