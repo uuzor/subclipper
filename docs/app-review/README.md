@@ -65,8 +65,10 @@ over-scoping, and a shorter list is easier to approve.
 - No read access to private messages, followers, or contacts.
 - No advertising or audience-insight scopes.
 - No scope whose only purpose would be analytics we do not yet ship. The
-  performance-learning loop ("Viral Intelligence") is designed but not
-  implemented, so no scope is requested for it.
+  performance loop reads the view, like, comment, share and watch-time counters
+  of posts this app published itself, which the publish scope already covers;
+  it does not request audience or account insights, so no analytics scope is
+  requested for it.
 - No ability to post without a scheduling action the user took.
 
 ## Filing order

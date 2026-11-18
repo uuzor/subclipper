@@ -251,6 +251,41 @@ class PublishRunOut(BaseModel):
     outcomes: list[dict] = Field(default_factory=list)
 
 
+class ClipMetricOut(BaseModel):
+    """One performance sample for a published clip."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    post_id: str
+    platform: str
+    views: int
+    likes: int
+    comments: int
+    shares: int
+    average_watch_seconds: float
+    captured_at: datetime
+
+
+class ClipPerformanceOut(BaseModel):
+    """Aggregated engagement for a clip, the shape the learning loop reads."""
+
+    clip_id: str
+    sample_count: int
+    platforms: dict = Field(default_factory=dict)
+    totals: dict = Field(default_factory=dict)
+
+
+class MetricsRunOut(BaseModel):
+    """Summary of one metrics-collection pass."""
+
+    examined: int
+    sampled: int
+    failed: int
+    skipped: int
+    outcomes: list[dict] = Field(default_factory=list)
+
+
 class ChannelSubscriptionIn(BaseModel):
     """Subscribe to a channel's uploads.
 

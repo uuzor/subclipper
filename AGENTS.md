@@ -382,3 +382,38 @@ bot" from cloud IPs, for every player client, including audio-only. URL
 ingestion therefore fails loudly with a 422 naming the 403 - it does not produce
 fake clips. Uploads are unaffected; local development can generate a source with
 `espeak-ng` + `ffmpeg` as in `examples/clips/README.md`.
+
+## Publishing: scheduler, adapters, and the metrics loop
+
+`src/quickreel/publishing/` is a plug-in seam, not a platform-specific module.
+An adapter implements `PlatformAdapter` (`base.py`): `publish`, `fetch_status`,
+`fetch_metrics`, plus the error classes that classify a failure
+(`AuthError`/`PermanentError`/`RateLimitError`/`TransientError`). Adding a real
+platform is a new module plus one entry in `registry.py`; the scheduler, models
+and routes do not change. `mocks.py` is a deterministic adapter whose failure
+modes are injectable, so every retry branch is tested offline.
+
+`QUICKREEL_PUBLISHING_MODE=mock` (the default) resolves every platform to the
+mock. `live` requires a registered real adapter and raises rather than silently
+falling back — a mock that reports success in production is the worst failure
+mode this subsystem has.
+
+`publishing/metrics.py` is the performance feedback loop. An hourly Celery beat
+entry (`quickreel.collect_metrics`) samples every published post whose cadence
+has elapsed and writes a `ClipMetric` row. Two invariants: a sampling failure
+never aborts the batch (one adapter raising must not stop the rest), and an
+`AuthError` flags the target `needs_reauth` instead of retrying forever. Totals
+in `clip_performance_summary` use the newest sample per platform, never the sum
+across samples — platform counters are cumulative, so summing the series counts
+the same view once per sweep.
+
+`pipeline/celery_app.py` had a broken relative import (`from .config` instead of
+`..config`) that nothing imported, so tests passed while `make worker` could not
+start. If you touch the worker, import the module in a test.
+
+## Trends: repurpose, do not re-upload
+
+Trend detection is a signal about what to make, not source footage to re-post.
+The trend feature targets a creator's own back catalogue, matched against
+official API signals; every project records `license_note` and `authorized_by`.
+See the README section "Trends: repurpose, do not re-upload".

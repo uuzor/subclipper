@@ -54,6 +54,24 @@ def run_due_posts_task(self) -> dict:  # pragma: no cover - worker path
     }
 
 
+@shared_task(name="quickreel.collect_metrics", bind=True, max_retries=0)
+def collect_metrics_task(self) -> dict:  # pragma: no cover - worker path
+    """Sample engagement counters for every published post that is due.
+
+    Driven by Celery beat. Safe to run concurrently: a duplicate sample is a
+    repeated point on a time series, not a corrupted value, and the cadence
+    check reads the newest sample so a post is not re-sampled too soon.
+    """
+    from ..publishing.metrics import run_metrics_collection
+
+    with session_scope() as session:
+        outcomes = run_metrics_collection(session)
+    sampled = sum(1 for o in outcomes if o.status == "sampled")
+    failed = sum(1 for o in outcomes if o.status == "failed")
+    logger.info("task.collect_metrics.done", sampled=sampled, failed=failed)
+    return {"examined": len(outcomes), "sampled": sampled, "failed": failed}
+
+
 @shared_task(name="quickreel.renew_youtube_subscriptions", bind=True, max_retries=0)
 def renew_youtube_subscriptions_task(self) -> dict:  # pragma: no cover - worker path
     """Renew WebSub leases before they lapse.

@@ -129,8 +129,15 @@ filter graph, so this is a local change.
 2. Poll or receive views, retention, shares and comment counts; store samples in
    `ClipMetric`. Recording starts from the first publish rather than when the
    loop is switched on, because the learning needs history that already exists.
-3. Store outcomes against the clip.
-4. Refit `scoring_weights` and, if useful, the penalty thresholds.
+   **Implemented** in `publishing/metrics.py`: an hourly Celery beat sweep
+   samples every published post whose cadence has elapsed, via the adapter's
+   `fetch_metrics`. `metrics_enabled=false` turns it off for a deployment that
+   must not make outbound calls.
+3. Store outcomes against the clip. **Implemented** — `GET
+   /api/v1/clips/{id}/performance` aggregates the samples into latest-per-platform
+   plus lifetime totals.
+4. Refit `scoring_weights` and, if useful, the penalty thresholds. **Not yet** —
+   the samples are being recorded so the history exists when this lands.
 5. Feed the new weights back through configuration.
 
 The `score_breakdown` persisted per clip is the training input.

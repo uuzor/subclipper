@@ -26,7 +26,8 @@ mockup: the pipeline runs end to end and produces real 1080x1920 MP4 files.
 | Face tracking / speaker-aware crop | Not yet | hook in `media/ffmpeg.py` |
 | Publishing to platforms | Mock adapters only | `publishing/` |
 | Channel ingestion trigger (WebSub) | Done (mock hub fallback) | `triggers/` |
-| Performance analytics / Viral Intelligence loop | Not yet | - |
+| Performance feedback loop (sample collection) | Done (mock adapters) | `publishing/metrics.py` |
+| Viral Intelligence weight recalibration | Not yet (data is being recorded) | `analysis/scoring.py` |
 
 ## Architecture
 
@@ -335,7 +336,8 @@ Distribution work, in build order:
 - ~~Upload and authorised-channel ingest feeding the scheduler~~ (done)
 - ~~YouTube upload-event trigger (WebSub; needs no app audit)~~ (done)
 - TikTok and YouTube Shorts adapters, then Meta once app review clears
-- Performance feedback loop, then trend-to-back-catalogue matching
+- ~~Performance feedback loop~~ (done — samples recorded from first publish)
+- Trend-to-back-catalogue matching
 
 ## Publishing and scheduling
 
@@ -411,6 +413,61 @@ Set `QUICKREEL_PUBLISHING_MODE=mock` (the default) and the hub is simulated too:
 subscriptions are created and leases tracked in memory, with no outbound calls,
 so the whole loop runs in tests and locally. The Channels page in the UI is the
 front end for this.
+
+## Performance feedback loop
+
+Publishing is only half of a distribution system. The other half is knowing what
+worked. Every published post is re-sampled on a cadence and the platform's
+counters — views, likes, comments, shares, average watch time — are stored in
+`ClipMetric`. Recording starts from the first publish, not from when someone
+turns the loop on, because the learning needs history that already exists.
+
+```bash
+# Sample every post whose cadence has elapsed (Celery beat does this hourly)
+curl -X POST localhost:12000/api/v1/metrics/run-due
+
+# Read the samples for one clip, or the aggregate
+curl localhost:12000/api/v1/clips/{clip_id}/metrics
+curl localhost:12000/api/v1/clips/{clip_id}/performance
+```
+
+Two properties matter. A sampling failure is never fatal: the loop runs
+unattended against rate-limited third-party APIs, so one adapter raising does not
+stop the rest of the batch, and an authentication failure flags the target for a
+reconnect instead of failing the same way forever. And totals use the newest
+sample per platform rather than the sum across samples, because platform
+counters are cumulative — summing the series would count the same view once per
+sweep.
+
+What is *not* built yet is the recalibration step: the weights in
+`analysis/scoring.py` are still the brief's initial assumptions. The samples are
+being collected now so that when recalibration lands there is history to fit,
+rather than a cold start. `QUICKREEL_METRICS_ENABLED=false` turns sampling off
+for a deployment that must not make outbound calls.
+
+## Trends: repurpose, do not re-upload
+
+Trend detection is a legitimate input, but it is not a licence to re-post someone
+else's video. Clipping a trending video and publishing it verbatim is exactly the
+behaviour that gets an account struck, and no amount of trend signal justifies
+it. The rule this project follows:
+
+- **The trend tells you what to make, not what to take.** A trending format,
+  topic, or sound is a signal about audience appetite. It is not source footage.
+- **Source material is your own or licensed.** The trend feature is aimed at a
+  creator's own back catalogue: match a signal from an official API against
+  videos you already have the rights to, then make a new clip from that. The
+  existing pipeline already records `license_note` and `authorized_by` per
+  project, so every clip can answer where its footage came from.
+- **The output is a transformation, not a copy.** Captions, vertical reframing,
+  boundary optimisation and re-scoring produce a new work from permitted input.
+  Re-uploading an untouched third-party clip is not a transformation.
+
+This is also why the platform APIs are asymmetric on purpose: publishing is open,
+ingestion is closed. TikTok, Meta, and YouTube all offer sanctioned ways to post
+your own content, and none offers a sanctioned way to pull someone else's content
+in. Anything that reads as "find a trending video and clip it" is the wrong
+shape for this product.
 
 ## App review
 

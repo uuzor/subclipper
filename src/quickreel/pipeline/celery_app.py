@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from celery import Celery
 
-from .config import get_settings
+from ..config import get_settings
 
 _settings = get_settings()
 
@@ -42,6 +42,14 @@ celery_app.conf.update(
         # itself is a network call to the hub.
         "renew-youtube-subscriptions": {
             "task": "quickreel.renew_youtube_subscriptions",
+            "schedule": 3600.0,
+        },
+        # The performance feedback loop. Hourly is enough: platform counters are
+        # cumulative, so this is how fast the curve is followed, and a slower
+        # cadence keeps the outbound call volume low. The task itself checks
+        # metrics_enabled and each post's own sample interval.
+        "collect-metrics": {
+            "task": "quickreel.collect_metrics",
             "schedule": 3600.0,
         },
     },

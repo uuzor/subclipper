@@ -9,6 +9,9 @@ The design is deliberately split so that adding a platform is additive:
 - :mod:`quickreel.publishing.mocks` provides a deterministic adapter so the
   whole scheduling loop is testable without network access or credentials.
 - :mod:`quickreel.publishing.scheduler` claims due posts and drives retries.
+- :mod:`quickreel.publishing.metrics` samples engagement counters after
+  publication. That history is the feedback loop the scoring model is
+  recalibrated against, and the one asset a competitor cannot copy quickly.
 
 A real platform integration is a new module implementing ``PlatformAdapter``
 plus one registry entry. It does not touch the scheduler, the models, or the

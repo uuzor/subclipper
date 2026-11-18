@@ -109,6 +109,18 @@ class Settings(BaseSettings):
     # effectively disappear.
     publish_max_backoff_seconds: int = 3600
 
+    # Performance feedback loop. Published posts are re-sampled on a cadence and
+    # the platform's counters are stored, because the per-niche engagement
+    # history is the one asset a competitor cannot copy quickly. Off only for a
+    # deployment that must not make outbound calls.
+    metrics_enabled: bool = True
+    # How often a single post is re-sampled. Counters are cumulative on the
+    # platform, so this is about how fast the curve is followed, not correctness.
+    metrics_sample_interval_seconds: int = 3600
+    # Stop sampling a clip this many days after it was published. The long tail
+    # past this point is noise for the learning loop.
+    metrics_max_age_days: int = 30
+
     # OAuth. ``public_base_url`` is the externally reachable origin, used to
     # build redirect URIs that the platform will call back to. It must be the
     # verified domain in production, because the platform rejects a mismatch.

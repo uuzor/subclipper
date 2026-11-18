@@ -17,6 +17,7 @@ from ...db import get_db
 from ...logging_setup import get_logger
 from ...models import (
     Clip,
+    ClipMetric,
     ClipStatus,
     Platform,
     Project,
@@ -26,9 +27,17 @@ from ...models import (
     ScheduledPostStatus,
     Workspace,
 )
+from ...publishing.metrics import (
+    clip_performance_summary,
+    collect_metrics_for_post,
+    run_metrics_collection,
+)
 from ...publishing.registry import available_adapters
 from ...publishing.scheduler import publish_post, run_due_posts
 from ...schemas import (
+    ClipMetricOut,
+    ClipPerformanceOut,
+    MetricsRunOut,
     PublishAttemptOut,
     PublishRunOut,
     PublishTargetIn,
@@ -287,6 +296,118 @@ def run_due(
                 "detail": o.detail,
                 "will_retry": o.will_retry,
                 "next_attempt_at": o.next_attempt_at.isoformat() if o.next_attempt_at else None,
+            }
+            for o in outcomes
+        ],
+    )
+
+
+@router.get("/clips/{clip_id}/metrics", response_model=list[ClipMetricOut])
+def list_clip_metrics(
+    clip_id: str,
+    limit: int = Query(default=200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> list[ClipMetric]:
+    """Every performance sample for one clip, oldest first.
+
+    Scoped through the clip's project, so a sample is only readable by the
+    workspace that owns the clip that produced it.
+    """
+    _scoped_clip(db, clip_id, workspace.id)
+    query = (
+        select(ClipMetric)
+        .join(ScheduledPost, ScheduledPost.id == ClipMetric.post_id)
+        .where(ScheduledPost.clip_id == clip_id)
+        .order_by(ClipMetric.captured_at)
+        .limit(limit)
+    )
+    return list(db.scalars(query).all())
+
+
+@router.get("/clips/{clip_id}/performance", response_model=ClipPerformanceOut)
+def get_clip_performance(
+    clip_id: str,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> ClipPerformanceOut:
+    """Aggregate engagement for a clip: latest per platform plus lifetime totals."""
+    _scoped_clip(db, clip_id, workspace.id)
+    summary = clip_performance_summary(db, clip_id)
+    return ClipPerformanceOut(clip_id=clip_id, **summary)
+
+
+@router.post("/clips/{clip_id}/metrics/collect", response_model=MetricsRunOut)
+def collect_clip_metrics(
+    clip_id: str,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> MetricsRunOut:
+    """Sample every published post for one clip now, ignoring the cadence.
+
+    The manual counterpart to the periodic sweep, for a user who wants the
+    numbers refreshed on demand. Scoped to the caller's workspace.
+    """
+    _scoped_clip(db, clip_id, workspace.id)
+    post_ids = list(
+        db.scalars(
+            select(ScheduledPost.id)
+            .where(
+                ScheduledPost.clip_id == clip_id,
+                ScheduledPost.status == ScheduledPostStatus.published,
+                ScheduledPost.external_post_id != "",
+            )
+        ).all()
+    )
+    outcomes = [collect_metrics_for_post(db, post_id) for post_id in post_ids]
+    counts = {"sampled": 0, "failed": 0, "skipped": 0}
+    for outcome in outcomes:
+        counts[outcome.status] = counts.get(outcome.status, 0) + 1
+    return MetricsRunOut(
+        examined=len(outcomes),
+        sampled=counts.get("sampled", 0),
+        failed=counts.get("failed", 0),
+        skipped=counts.get("skipped", 0),
+        outcomes=[
+            {
+                "post_id": o.post_id,
+                "status": o.status,
+                "detail": o.detail,
+                "metric_id": o.metric_id,
+            }
+            for o in outcomes
+        ],
+    )
+
+
+@router.post("/metrics/run-due", response_model=MetricsRunOut)
+def run_due_metrics(
+    limit: int = Query(default=200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> MetricsRunOut:
+    """Sample every post whose cadence has elapsed. The call the worker makes.
+
+    Scoped to the caller's workspace so one tenant cannot trigger another's
+    outbound sampling by pressing the button.
+    """
+    outcomes = run_metrics_collection(
+        db, now=datetime.now(UTC), limit=limit, workspace_id=workspace.id
+    )
+    counts = {"sampled": 0, "failed": 0, "skipped": 0}
+    for outcome in outcomes:
+        counts[outcome.status] = counts.get(outcome.status, 0) + 1
+    return MetricsRunOut(
+        examined=len(outcomes),
+        sampled=counts.get("sampled", 0),
+        failed=counts.get("failed", 0),
+        skipped=counts.get("skipped", 0),
+        outcomes=[
+            {
+                "post_id": o.post_id,
+                "status": o.status,
+                "detail": o.detail,
+                "metric_id": o.metric_id,
             }
             for o in outcomes
         ],

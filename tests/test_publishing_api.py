@@ -284,3 +284,109 @@ def test_provenance_defaults_to_empty(auth_client):
     body = created.json()
     assert body["license_note"] == ""
     assert body["authorized_by"] == ""
+
+
+def _publish_a_clip(auth_client, sample_video) -> tuple[str, str]:
+    """Publish one clip and return (clip_id, post_id).
+
+    The metrics loop only samples published posts, so the tests below start from
+    a real publish rather than inserting a row, which keeps them honest about the
+    state the loop actually sees.
+    """
+    clip_id = _rendered_clip(auth_client, sample_video)
+    target_id = _target(auth_client)
+    created = auth_client.post(
+        "/api/v1/scheduled-posts",
+        json={
+            "clip_id": clip_id,
+            "target_id": target_id,
+            "scheduled_for": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+            "caption": "Watch this",
+        },
+    )
+    assert created.status_code == 201, created.text
+    post_id = created.json()["id"]
+    run = auth_client.post("/api/v1/publishing/run-due")
+    assert run.status_code == 200, run.text
+    assert run.json()["published"] == 1
+    return clip_id, post_id
+
+
+def test_collect_metrics_records_a_sample_for_a_published_clip(auth_client, sample_video):
+    clip_id, _ = _publish_a_clip(auth_client, sample_video)
+
+    run = auth_client.post(f"/api/v1/clips/{clip_id}/metrics/collect")
+    assert run.status_code == 200, run.text
+    assert run.json()["sampled"] == 1
+
+    samples = auth_client.get(f"/api/v1/clips/{clip_id}/metrics")
+    assert samples.status_code == 200, samples.text
+    body = samples.json()
+    assert len(body) == 1
+    assert body[0]["views"] > 0
+    assert body[0]["platform"] == "tiktok"
+
+
+def test_clip_performance_aggregates_samples(auth_client, sample_video):
+    clip_id, _ = _publish_a_clip(auth_client, sample_video)
+    auth_client.post(f"/api/v1/clips/{clip_id}/metrics/collect")
+
+    performance = auth_client.get(f"/api/v1/clips/{clip_id}/performance")
+    assert performance.status_code == 200, performance.text
+    body = performance.json()
+    assert body["clip_id"] == clip_id
+    assert body["sample_count"] == 1
+    assert body["totals"]["views"] > 0
+    assert "tiktok" in body["platforms"]
+
+
+def test_performance_is_empty_before_any_sample(auth_client, sample_video):
+    clip_id, _ = _publish_a_clip(auth_client, sample_video)
+
+    body = auth_client.get(f"/api/v1/clips/{clip_id}/performance").json()
+    assert body["sample_count"] == 0
+    assert body["totals"] == {}
+
+
+def test_run_due_metrics_samples_and_is_idempotent_within_the_interval(
+    auth_client, sample_video
+):
+    clip_id, _ = _publish_a_clip(auth_client, sample_video)
+
+    first = auth_client.post("/api/v1/metrics/run-due")
+    assert first.status_code == 200, first.text
+    assert first.json()["sampled"] == 1
+
+    # Sampled just now, so a second sweep within the interval finds nothing due.
+    second = auth_client.post("/api/v1/metrics/run-due")
+    assert second.json()["examined"] == 0
+
+
+def test_metrics_are_scoped_to_the_caller(auth_client, second_auth_client, sample_video):
+    """A clip's samples are readable only by the workspace that owns the clip."""
+    clip_id, _ = _publish_a_clip(auth_client, sample_video)
+    auth_client.post(f"/api/v1/clips/{clip_id}/metrics/collect")
+
+    assert second_auth_client.get(f"/api/v1/clips/{clip_id}/metrics").status_code == 404
+    assert second_auth_client.get(f"/api/v1/clips/{clip_id}/performance").status_code == 404
+    assert (
+        second_auth_client.post(f"/api/v1/clips/{clip_id}/metrics/collect").status_code == 404
+    )
+
+
+def test_metrics_endpoints_reject_an_anonymous_caller(auth_client, sample_video):
+    """The metrics routes are closed to a caller with no session.
+
+    A fresh client is used rather than the ``client`` fixture, because
+    ``auth_client`` is built on top of it and they share a cookie jar.
+    """
+    from fastapi.testclient import TestClient
+
+    from quickreel.main import create_app
+
+    clip_id, _ = _publish_a_clip(auth_client, sample_video)
+
+    with TestClient(create_app(), base_url="https://testserver") as anon:
+        assert anon.get(f"/api/v1/clips/{clip_id}/metrics").status_code == 401
+        assert anon.get(f"/api/v1/clips/{clip_id}/performance").status_code == 401
+        assert anon.post("/api/v1/metrics/run-due").status_code == 401

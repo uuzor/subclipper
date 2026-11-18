@@ -112,6 +112,7 @@ The single sentence reviewers listen for:
   private review account, a reviewer who recognises copyrighted footage will
   question the rights position, which is the one question this product must
   never invite.
-- Do not narrate a feature that is not built. The performance-learning loop is
-  described in the product brief but not implemented; describing it as live
-  invites a follow-up the product cannot answer.
+- Do not narrate a feature that is not built. The performance loop is live and
+  reads engagement counters for posts this app published; it does not read
+  audience insights, and the scoring weights are not yet recalibrated from the
+  data, so do not present the learning side as active.

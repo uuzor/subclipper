@@ -75,6 +75,7 @@ class MockAdapter:
 
     def fetch_metrics(self, target_credentials: dict, external_post_id: str) -> dict:
         self.metrics_checks.append(external_post_id)
+        self._maybe_fail()
         # Deterministic, non-zero so a caller that charts metrics sees a shape.
         seed = sum(ord(c) for c in external_post_id) or 1
         return {
