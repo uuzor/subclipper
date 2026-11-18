@@ -32,9 +32,22 @@ The account must have:
 
 ### Seeding it
 
-The pipeline is deterministic in mock mode, so the project can be built by
-generating a synthetic source and running it. Generate the sample the way
-`examples/clips/README.md` does, so the demo contains no third-party footage:
+`scripts/seed_review_account.py` builds the whole thing over the public API, so
+it exercises the same path a real user takes. It is idempotent, so re-running it
+reuses the existing project rather than creating a second one.
+
+```bash
+make seed-review PASSWORD='<set at filing time>' \
+  PUBLIC_BASE_URL=https://clipviralmoment.com
+```
+
+It generates the source with ffmpeg (and espeak-ng when it is installed, so the
+moment detector sees real speech), then creates the project, processes it,
+renders the top clip to 1080×1920 with burned captions, creates a publish
+target, and schedules a post. Nothing third-party is used: the source is
+synthetic, and the project's `license_note` records that.
+
+The manual equivalent, if you would rather run the steps yourself:
 
 ```bash
 # 0. A synthetic long-form source (speech over a plain background). No

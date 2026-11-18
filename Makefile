@@ -1,4 +1,4 @@
-.PHONY: install install-ai install-download install-all test lint fmt run worker serve deploy build-frontend clean
+.PHONY: install install-ai install-download install-all test lint fmt run worker serve deploy build-frontend seed-review clean
 
 install:
 	python3 -m venv .venv
@@ -45,6 +45,15 @@ deploy: build-frontend
 
 worker:
 	.venv/bin/celery -A quickreel.pipeline.celery_app:celery_app worker -l info
+
+# Seed the app-review demo account: a processed project, a rendered 9:16 clip
+# and a scheduled post, built over the public API. Idempotent. Pass the review
+# password at run time; it is never stored in the repository.
+seed-review:
+	.venv/bin/python scripts/seed_review_account.py \
+		--base-url $(or $(PUBLIC_BASE_URL),http://localhost:12000) \
+		--email $(or $(EMAIL),appreview@clipviralmoment.com) \
+		--password $(PASSWORD)
 
 clean:
 	rm -rf .pytest_cache .ruff_cache tests/.tmp data
