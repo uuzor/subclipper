@@ -286,6 +286,34 @@ class MetricsRunOut(BaseModel):
     outcomes: list[dict] = Field(default_factory=list)
 
 
+class CalibrationOut(BaseModel):
+    """One proposed recalibration of the scoring weights.
+
+    ``applied`` and the ``diagnostics.applicable`` flag are distinct on purpose:
+    applicable means the fit beat the current weights, applied means someone
+    installed it. A proposal can be applicable and unapplied.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    proposed_weights: dict = Field(default_factory=dict)
+    baseline_weights: dict = Field(default_factory=dict)
+    sample_size: int
+    platform_counts: dict = Field(default_factory=dict)
+    diagnostics: dict = Field(default_factory=dict)
+    applied: bool
+    applied_at: datetime | None = None
+    created_at: datetime
+
+
+class CalibrationApplyOut(BaseModel):
+    """Result of installing a proposal."""
+
+    calibration: CalibrationOut
+    active_weights: dict = Field(default_factory=dict)
+
+
 class ChannelSubscriptionIn(BaseModel):
     """Subscribe to a channel's uploads.
 

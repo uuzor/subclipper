@@ -24,6 +24,7 @@ from ..ai.registry import (
     get_vision_provider,
 )
 from ..analysis.boundaries import BoundaryOptimizer
+from ..analysis.calibration import latest_applied_weights
 from ..analysis.moments import MomentSelector
 from ..analysis.scoring import ViralScorer
 from ..config import get_settings
@@ -47,6 +48,17 @@ class Pipeline:
         # Set by detect_moments so run() can record provenance without building
         # the moment provider a second time.
         self._moment_provider_name = "unknown"
+
+    def _active_weights(self, project: Project) -> dict[str, float]:
+        """The scoring weights this project's workspace has calibrated to.
+
+        Falls back to the configured defaults when the workspace has never
+        applied a fit, so a fresh tenant scores exactly as it always did.
+        """
+        if not self.settings.scoring_calibration_enabled:
+            return dict(self.settings.scoring_weights)
+        calibrated = latest_applied_weights(self.session, project.workspace_id)
+        return calibrated or dict(self.settings.scoring_weights)
 
     # -- public entry point ------------------------------------------------
 
@@ -239,7 +251,7 @@ class Pipeline:
         moment_provider = get_moment_provider()
         selector = MomentSelector(
             provider=moment_provider,
-            scorer=ViralScorer(),
+            scorer=ViralScorer(self._active_weights(project)),
             optimizer=BoundaryOptimizer(),
         )
         moments = selector.select(

@@ -411,6 +411,27 @@ the same view once per sweep.
 `..config`) that nothing imported, so tests passed while `make worker` could not
 start. If you touch the worker, import the module in a test.
 
+`analysis/calibration.py` is the read half of that loop: it fits the scoring
+weights to the recorded samples. Invariants worth not breaking:
+
+- **A fit never applies itself.** `propose_calibration` writes a
+  `ScoringCalibration` row; installing it is a separate explicit call. A loop
+  that silently rewrote the model it is judged by has no ground truth left.
+- **A fit that cannot beat the prior is refused.** If `fitted_r_squared <=
+  prior_r_squared` the proposal is recorded as `applicable: false` and
+  `apply_calibration` raises. Do not relax this to make a demo look better.
+- **Weights stay a distribution.** Projected onto sum-to-one with a
+  `WEIGHT_FLOOR` under each factor. Never zero a factor on a small sample.
+- **Outcomes are ranked within each platform** before fitting, because a TikTok
+  view and a Shorts view are not the same unit.
+- **Pure standard library.** numpy is only in the optional `ai` extra, so
+  calibration must not import it or the core install breaks.
+
+`Pipeline._active_weights` is the only place weights are resolved for scoring;
+it prefers the workspace's applied vector and falls back to configuration. A
+per-request `ViralScorer()` built from settings would silently ignore every
+applied calibration, which is the bug this seam exists to prevent.
+
 ## Trends: repurpose, do not re-upload
 
 Trend detection is a signal about what to make, not source footage to re-post.

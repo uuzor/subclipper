@@ -460,6 +460,40 @@ class PublishAttempt(Base):
     post: Mapped[ScheduledPost] = relationship(back_populates="attempts_log")
 
 
+class ScoringCalibration(Base):
+    """One proposed recalibration of the viral scoring weights.
+
+    The model is a prediction, and the point of the feedback loop is to replace
+    the initial guesses with weights fitted to what actually happened. A fit is
+    stored rather than applied so the change is reviewable: the proposal records
+    the weights it would install, the sample it was fitted on and the
+    diagnostics that justify it, and ``applied_at`` is set only when a human (or
+    an explicit API call) promotes it. Nothing about scoring changes silently.
+    """
+
+    __tablename__ = "scoring_calibrations"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    # Calibration is per tenant: one workspace's audience is not another's, and
+    # a shared weight vector would blend two different signals.
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    # Weights the fit proposes, and the weights that were live when it ran.
+    proposed_weights: Mapped[dict] = mapped_column(JSON, default=dict)
+    baseline_weights: Mapped[dict] = mapped_column(JSON, default=dict)
+    # How many clips with both components and outcomes the fit used, plus the
+    # per-platform counts so a lopsided sample is visible.
+    sample_size: Mapped[int] = mapped_column(Integer, default=0)
+    platform_counts: Mapped[dict] = mapped_column(JSON, default=dict)
+    diagnostics: Mapped[dict] = mapped_column(JSON, default=dict)
+    # A fit that cannot beat the prior is still recorded, with this set, so the
+    # UI can say "not enough signal yet" instead of showing a bogus proposal.
+    applied: Mapped[bool] = mapped_column(default=False)
+    applied_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+
+
 class ClipMetric(Base):
     """A performance sample for a published clip.
 

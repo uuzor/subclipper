@@ -93,9 +93,10 @@ pure function. Each clip stores a `score_breakdown` containing:
 
 Weights default to the brief's initial design assumptions and are normalised to
 sum to 1.0 at construction. Calibrating them against real engagement data is the
-Phase 7 "Viral Intelligence" work: persist outcome data per clip (views,
-retention, shares) and fit the weights to it. Because the breakdown is stored
-alongside every score, recalibration does not require re-running the pipeline.
+Phase 7 "Viral Intelligence" work, implemented in `analysis/calibration.py`:
+persist outcome data per clip (views, retention, shares), fit the weights to it,
+and install a fit explicitly. Because the breakdown is stored alongside every
+score, recalibration does not require re-running the pipeline.
 
 ## Boundary optimisation
 
@@ -136,9 +137,30 @@ filter graph, so this is a local change.
 3. Store outcomes against the clip. **Implemented** — `GET
    /api/v1/clips/{id}/performance` aggregates the samples into latest-per-platform
    plus lifetime totals.
-4. Refit `scoring_weights` and, if useful, the penalty thresholds. **Not yet** —
-   the samples are being recorded so the history exists when this lands.
-5. Feed the new weights back through configuration.
+4. Refit `scoring_weights` and, if useful, the penalty thresholds.
+   **Implemented** in `analysis/calibration.py`. A fit reads every clip that has
+   both `score_components` and recorded samples, ranks outcomes within each
+   platform, and fits the six weights by projected gradient descent under three
+   constraints: the vector sums to one, every factor keeps a floor, and a ridge
+   term pulls toward the current weights with a strength that decays as the
+   sample grows. A proposal is stored as a `ScoringCalibration` row and applied
+   only by an explicit call, so the model never silently rewrites the thing it
+   is judged by. A fit that cannot explain more engagement variance than the
+   weights it would replace is recorded as not applicable and refused at apply
+   time. The pipeline loads a workspace's applied vector when it builds its
+   scorer, so an installed fit changes what gets clipped from the next run;
+   existing clips keep the score they were given, which keeps the next fit
+   comparable.
+
+   Two things are deliberately left for later. Penalty thresholds are not
+   refitted, because a penalty fires on a property of the clip rather than a
+   continuous factor and needs a different estimator. And a fit is per
+   workspace, not global: one audience's signal is not another's, so a shared
+   vector would blend two different things.
+5. Feed the new weights back through configuration. **Implemented** — an applied
+   `ScoringCalibration` is the workspace's active vector, read by
+   `Pipeline._active_weights`; configuration remains the fallback for a workspace
+   that has never applied a fit.
 
 The `score_breakdown` persisted per clip is the training input.
 

@@ -13,6 +13,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ...analysis.calibration import (
+    apply_calibration,
+    latest_applied_weights,
+    propose_calibration,
+)
+from ...config import get_settings
 from ...db import get_db
 from ...logging_setup import get_logger
 from ...models import (
@@ -25,6 +31,7 @@ from ...models import (
     PublishTarget,
     ScheduledPost,
     ScheduledPostStatus,
+    ScoringCalibration,
     Workspace,
 )
 from ...publishing.metrics import (
@@ -35,6 +42,8 @@ from ...publishing.metrics import (
 from ...publishing.registry import available_adapters
 from ...publishing.scheduler import publish_post, run_due_posts
 from ...schemas import (
+    CalibrationApplyOut,
+    CalibrationOut,
     ClipMetricOut,
     ClipPerformanceOut,
     MetricsRunOut,
@@ -411,4 +420,97 @@ def run_due_metrics(
             }
             for o in outcomes
         ],
+    )
+
+
+# --- Viral Intelligence: scoring recalibration ------------------------------
+#
+# The loop records engagement in publishing.metrics; these endpoints turn that
+# history into a proposal and let it be installed. Proposing and applying are
+# deliberately separate calls: a fit that silently rewrote the weights it is
+# judged by would leave nothing to check it against.
+
+
+@router.post("/scoring/calibration", response_model=CalibrationOut, status_code=201)
+def propose_scoring_calibration(
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> ScoringCalibration:
+    """Fit scoring weights to this workspace's recorded engagement.
+
+    Records a proposal; does not change how anything is scored. A fit on too
+    little data is still recorded, marked not applicable, so the UI can say so.
+    """
+    settings = get_settings()
+    if not settings.scoring_calibration_enabled:
+        raise HTTPException(status_code=409, detail="scoring calibration is disabled")
+
+    # Fit against whatever is currently active, so repeated passes converge
+    # rather than each one re-fitting from the original defaults.
+    prior = latest_applied_weights(db, workspace.id) or dict(settings.scoring_weights)
+    record = propose_calibration(db, workspace.id, prior)
+    db.commit()
+    return record
+
+
+@router.get("/scoring/calibration", response_model=list[CalibrationOut])
+def list_scoring_calibrations(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> list[ScoringCalibration]:
+    """Recent proposals for this workspace, newest first."""
+    return list(
+        db.scalars(
+            select(ScoringCalibration)
+            .where(ScoringCalibration.workspace_id == workspace.id)
+            .order_by(ScoringCalibration.created_at.desc())
+            .limit(limit)
+        ).all()
+    )
+
+
+@router.get("/scoring/weights")
+def get_active_scoring_weights(
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> dict:
+    """The weights currently in force, and whether they came from a fit."""
+    settings = get_settings()
+    calibrated = latest_applied_weights(db, workspace.id)
+    return {
+        "weights": calibrated or dict(settings.scoring_weights),
+        "source": "calibrated" if calibrated else "configured",
+    }
+
+
+@router.post(
+    "/scoring/calibration/{calibration_id}/apply", response_model=CalibrationApplyOut
+)
+def apply_scoring_calibration(
+    calibration_id: str,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> CalibrationApplyOut:
+    """Install a proposal as the workspace's active weights."""
+    record = db.scalars(
+        select(ScoringCalibration).where(
+            ScoringCalibration.id == calibration_id,
+            ScoringCalibration.workspace_id == workspace.id,
+        )
+    ).first()
+    if record is None:
+        raise HTTPException(status_code=404, detail="calibration not found")
+    if record.applied:
+        raise HTTPException(status_code=409, detail="calibration is already applied")
+
+    try:
+        apply_calibration(db, record)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.commit()
+
+    return CalibrationApplyOut(
+        calibration=CalibrationOut.model_validate(record),
+        active_weights=dict(record.proposed_weights),
     )

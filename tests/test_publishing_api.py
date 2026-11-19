@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 
 def _rendered_clip(auth_client, sample_video: Path) -> str:
     """Run a project all the way to a rendered clip and return its id."""
@@ -390,3 +392,86 @@ def test_metrics_endpoints_reject_an_anonymous_caller(auth_client, sample_video)
         assert anon.get(f"/api/v1/clips/{clip_id}/metrics").status_code == 401
         assert anon.get(f"/api/v1/clips/{clip_id}/performance").status_code == 401
         assert anon.post("/api/v1/metrics/run-due").status_code == 401
+
+
+# -- Viral Intelligence: scoring recalibration -------------------------------
+
+
+def test_active_weights_default_to_the_configured_vector(auth_client):
+    body = auth_client.get("/api/v1/scoring/weights").json()
+
+    assert body["source"] == "configured"
+    assert sum(body["weights"].values()) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_proposing_a_calibration_on_no_history_is_recorded_but_not_applicable(auth_client):
+    response = auth_client.post("/api/v1/scoring/calibration")
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["sample_size"] == 0
+    assert body["applied"] is False
+    assert body["diagnostics"]["applicable"] is False
+    assert "not enough" in body["diagnostics"]["reason"]
+
+
+def test_an_inapplicable_calibration_cannot_be_applied(auth_client):
+    proposed = auth_client.post("/api/v1/scoring/calibration").json()
+
+    response = auth_client.post(f"/api/v1/scoring/calibration/{proposed['id']}/apply")
+
+    assert response.status_code == 422
+
+
+def test_applying_a_calibration_twice_is_rejected(auth_client, db_session):
+    from quickreel.models import ScoringCalibration
+
+    proposed = auth_client.post("/api/v1/scoring/calibration").json()
+    # Force the stored proposal to look applicable, so the second-apply guard is
+    # what this test exercises rather than the applicability check.
+    record = db_session.get(ScoringCalibration, proposed["id"])
+    record.diagnostics = {**record.diagnostics, "applicable": True}
+    db_session.commit()
+
+    first = auth_client.post(f"/api/v1/scoring/calibration/{proposed['id']}/apply")
+    second = auth_client.post(f"/api/v1/scoring/calibration/{proposed['id']}/apply")
+
+    assert first.status_code == 200, first.text
+    assert first.json()["calibration"]["applied"] is True
+    assert first.json()["active_weights"] == pytest.approx(
+        first.json()["calibration"]["proposed_weights"], abs=1e-9
+    )
+    assert second.status_code == 409
+
+
+def test_an_applied_calibration_becomes_the_active_weights(auth_client, db_session):
+    from quickreel.models import ScoringCalibration
+
+    proposed = auth_client.post("/api/v1/scoring/calibration").json()
+    record = db_session.get(ScoringCalibration, proposed["id"])
+    record.diagnostics = {**record.diagnostics, "applicable": True}
+    db_session.commit()
+    auth_client.post(f"/api/v1/scoring/calibration/{proposed['id']}/apply")
+
+    body = auth_client.get("/api/v1/scoring/weights").json()
+
+    assert body["source"] == "calibrated"
+
+
+def test_calibration_history_lists_newest_first(auth_client):
+    auth_client.post("/api/v1/scoring/calibration")
+    auth_client.post("/api/v1/scoring/calibration")
+
+    body = auth_client.get("/api/v1/scoring/calibration").json()
+
+    assert len(body) == 2
+
+
+def test_a_calibration_is_not_visible_to_another_workspace(auth_client, second_auth_client):
+    proposed = auth_client.post("/api/v1/scoring/calibration").json()
+
+    listed = second_auth_client.get("/api/v1/scoring/calibration").json()
+    applied = second_auth_client.post(f"/api/v1/scoring/calibration/{proposed['id']}/apply")
+
+    assert listed == []
+    assert applied.status_code == 404
