@@ -550,3 +550,17 @@ captions off the top of the frame and they disappeared completely. The pixel
 safe area is divided by that scale before being used. `test_caption_safe_area_
 moves_text_above_the_platform_chrome` renders a black frame and reads the rows
 the text occupies, so the conversion is checked against the image.
+
+## Deployment: the key must reach the service
+
+A provider is only wired once its key is on the service. NVIDIA was configured
+in code for three directives and stayed dormant in production the whole time
+because `QUICKREEL_NVIDIA_API_KEY` was never added to the Koyeb service, so
+`auto` silently fell through to Gemini. Check `/readyz` after a deploy: it names
+the provider behind each stage. `{"transcription":"smallest-pulse"}` is the
+signal the speech fix is live, not merely merged.
+
+`QUICKREEL_SMALLEST_API_KEY` is set on the Koyeb service. The image installs
+`hosted-ai`, so providers reach the network with `httpx`, never `requests` -
+`requests` is not installed and an import of it fails at the first call, after
+the upload has already succeeded.
