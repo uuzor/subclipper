@@ -25,7 +25,7 @@ services:
     dockerContext: .
     plan: standard
     region: oregon
-    healthCheckPath: /health
+    healthCheckPath: /healthz
     autoDeployTrigger: commit
     envVars:
       # Production refuses to start on an unsafe configuration: mock publishing,

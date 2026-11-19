@@ -101,7 +101,7 @@ uploads and renders. Point Render at this repository and pick **Blueprint**.
 
 ```bash
 # Verify a running deployment
-curl -fsS https://<host>/health
+curl -fsS https://<host>/healthz
 curl -fsS -o /dev/null -w '%{http_code}\n' https://<host>/workbench   # SPA deep link
 ```
 

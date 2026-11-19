@@ -83,10 +83,15 @@ unmodified.
 ## Verifying a deployment
 
 ```bash
-curl -fsS https://<host>/health
+curl -fsS https://<host>/healthz    # liveness: {"status":"ok"}
+curl -fsS https://<host>/readyz     # env and which providers are serving
 curl -fsS -o /dev/null -w '%{http_code}\n' https://<host>/        # SPA shell
 curl -fsS -o /dev/null -w '%{http_code}\n' https://<host>/docs    # OpenAPI UI
 ```
+
+`/readyz` is the one to read after a deploy: it names the provider behind each
+stage, so a run served by the deterministic fakes is visible there instead of
+looking like a healthy deployment that quietly produces fake clips.
 
 A deep link such as `/workbench` must return the SPA shell, while an unknown
 `/api/v1/...` path must stay a JSON 404 rather than quietly returning HTML.
