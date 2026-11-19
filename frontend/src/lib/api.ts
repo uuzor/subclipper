@@ -1,6 +1,8 @@
 import type {
   ChannelSubscription,
   Clip,
+  ExportPlatform,
+  ExportPlatformKey,
   HubInfo,
   OAuthProviderInfo,
   OAuthStart,
@@ -285,12 +287,19 @@ export const api = {
 
   render: (
     id: string,
-    opts: { max_clips?: number; vertical?: boolean; burn_captions?: boolean } = {},
+    opts: {
+      max_clips?: number;
+      vertical?: boolean;
+      burn_captions?: boolean;
+      platform?: ExportPlatformKey;
+    } = {},
   ) =>
     request<Clip[]>(`/projects/${id}/render`, {
       method: "POST",
       body: JSON.stringify({ max_clips: 5, vertical: true, burn_captions: true, ...opts }),
     }),
+
+  exportPlatforms: () => request<ExportPlatform[]>("/export-platforms"),
 
   clipDownloadUrl: (clipId: string) => `${BASE}/clips/${clipId}/download`,
 

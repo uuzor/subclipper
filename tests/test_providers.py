@@ -519,3 +519,88 @@ def test_audio_envelope_has_no_infinities(tmp_path):
         assert frame.rms == frame.rms  # NaN check
         assert frame.rms != float("-inf")
         assert frame.peak != float("-inf")
+
+
+def test_segments_are_cut_from_word_timings():
+    """Word timings must become sentence-sized cues, not one blob.
+
+    Pulse returns a flat word array. Clipping needs cues bounded by sentence and
+    pause, so a 2-hour podcast does not arrive as a single segment whose
+    start/end spans the whole file.
+    """
+    from quickreel.ai.providers import _segments_from_words
+
+    words = [
+        {"word": "Hello", "start": 0.0, "end": 0.4},
+        {"word": "there.", "start": 0.4, "end": 0.9},
+        {"word": "Second", "start": 1.0, "end": 1.5},
+        {"word": "sentence.", "start": 1.5, "end": 2.2},
+        # A long pause must also break the cue, even without punctuation.
+        {"word": "After", "start": 4.0, "end": 4.4},
+        {"word": "pause", "start": 4.4, "end": 4.8},
+    ]
+    segments = _segments_from_words(words)
+
+    assert [segment.text for segment in segments] == [
+        "Hello there.",
+        "Second sentence.",
+        "After pause",
+    ]
+    assert segments[0].start == 0.0
+    assert segments[0].end == 0.9
+    assert segments[2].start == 4.0
+    assert segments[0].words[0]["word"] == "Hello"
+
+
+def test_smallest_provider_parses_a_real_response_shape(monkeypatch, tmp_path):
+    """Pin the documented Pulse response so a shape change fails here.
+
+    This mirrors the live response body: a flat ``words`` array with
+    ``word``/``start``/``end``, plus ``transcription`` and ``language``.
+    """
+    from quickreel.ai.providers import SmallestTranscriptionProvider
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "status": "success",
+                "transcription": "The biggest mistake I made was trusting everyone.",
+                "language": "en",
+                "words": [
+                    {"word": "The", "start": 0.16, "end": 0.24, "confidence": 0.98},
+                    {"word": "biggest", "start": 0.32, "end": 0.64, "confidence": 0.99},
+                    {"word": "mistake", "start": 0.72, "end": 1.12, "confidence": 0.98},
+                    {"word": "everyone.", "start": 2.48, "end": 3.2, "confidence": 0.99},
+                ],
+                "metadata": {"duration": 3.4},
+            }
+
+    class FakeSession:
+        def post(self, url, **kwargs):
+            assert url.endswith("/waves/v1/stt/")
+            assert kwargs["params"]["word_timestamps"] == "true"
+            assert kwargs["headers"]["Authorization"].startswith("Bearer ")
+            return FakeResponse()
+
+    monkeypatch.setenv("QUICKREEL_SMALLEST_API_KEY", "test-key")
+    get_settings.cache_clear()
+    try:
+        provider = SmallestTranscriptionProvider(session=FakeSession())
+    finally:
+        get_settings.cache_clear()
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"RIFF....WAVEfmt ")
+    result = provider.transcribe(audio)
+
+    assert result.provider == "smallest-pulse"
+    assert result.language == "en"
+    # The sample omits "I" and "was", so the cue breaks at the 1.36s gap before
+    # "everyone." - exactly the pause-splitting the segmenter is meant to do.
+    assert len(result.segments) == 2
+    assert result.segments[0].start == 0.16
+    assert result.segments[0].end == 1.12
+    assert result.segments[1].end == 3.2
+    assert sum(len(segment.words) for segment in result.segments) == 4

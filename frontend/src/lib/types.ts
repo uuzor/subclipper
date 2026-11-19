@@ -119,6 +119,25 @@ export interface RenderResult {
   max_clips?: number;
   vertical?: boolean;
   burn_captions?: boolean;
+  platform?: ExportPlatformKey;
+}
+
+export type ExportPlatformKey =
+  | "tiktok"
+  | "youtube_shorts"
+  | "instagram_reels"
+  | "youtube"
+  | "square"
+  | "portrait";
+
+export interface ExportPlatform {
+  key: ExportPlatformKey;
+  label: string;
+  width: number;
+  height: number;
+  aspect: string;
+  max_seconds: number;
+  notes: string;
 }
 
 /* ---- Publishing ---- */

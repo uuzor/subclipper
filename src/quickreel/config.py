@@ -81,6 +81,16 @@ class Settings(BaseSettings):
     nvidia_asr_chunk_seconds: float = 120.0
     nvidia_asr_max_chunks: int = 240
 
+    # Smallest AI Pulse speech-to-text. Purpose-built ASR with real word
+    # timestamps, which is the one thing the general multimodal models cannot
+    # give us: asked for timestamps they estimate them from word counts.
+    smallest_api_key: str = ""
+    smallest_base_url: str = "https://api.smallest.ai"
+    # pulse-pro is English-tuned and pre-recorded only; pulse is multilingual.
+    smallest_stt_model: str = "pulse-pro"
+    smallest_stt_language: str = "en"
+    smallest_timeout_seconds: int = 300
+
     # OpenAI-compatible LLM
     llm_base_url: str = ""
     llm_api_key: str = ""

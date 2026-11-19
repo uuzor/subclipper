@@ -414,7 +414,7 @@ def detect_scenes(source: str | Path, threshold: float = 0.3) -> list[float]:
     return scenes
 
 
-def render_vertical_clip(
+def render_clip(
     source: str | Path,
     target: str | Path,
     start: float,
@@ -425,12 +425,19 @@ def render_vertical_clip(
     burn_captions: bool = False,
     subtitle_path: str | Path | None = None,
     normalize_audio: bool = True,
+    bottom_safe_pixels: int = 0,
+    video_bitrate: str = "6M",
+    audio_bitrate: str = "192k",
 ) -> Path:
-    """Cut ``[start, end]`` and reframe to a 9:16 vertical clip.
+    """Cut ``[start, end]`` and reframe to ``width`` x ``height``.
 
     Strategy: scale to cover the target canvas then centre-crop. A saliency-aware
     crop driven by face tracking plugs in here later (see docs/architecture.md)
     by replacing the ``crop`` filter with per-frame x offsets.
+
+    ``bottom_safe_pixels`` lifts burned-in captions above the area the destination
+    platform covers with its own interface. Captions drawn at the default
+    baseline are hidden behind TikTok's description and Instagram's action rail.
     """
     settings = get_settings()
     target = Path(target)
@@ -444,79 +451,7 @@ def render_vertical_clip(
         "setsar=1",
     ]
     if burn_captions and subtitle_path:
-        # Escape the path for the filter graph.
-        escaped = str(subtitle_path).replace("\\", "\\\\").replace(":", r"\:").replace("'", r"\'")
-        filters.append(f"subtitles='{escaped}'")
-
-    audio_filters = "loudnorm=I=-16:TP=-1.5:LRA=11" if normalize_audio else None
-
-    cmd = [
-        settings.ffmpeg_bin,
-        "-y",
-        "-ss",
-        f"{start:.3f}",
-        "-t",
-        f"{duration:.3f}",
-        "-i",
-        str(source),
-    ]
-    if audio_filters:
-        cmd += ["-af", audio_filters]
-    cmd += [
-        "-vf",
-        ",".join(filters),
-        "-threads",
-        str(settings.render_threads),
-        "-filter_threads",
-        str(settings.render_threads),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "20",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-movflags",
-        "+faststart",
-        str(target),
-    ]
-    _run(cmd, timeout=settings.render_timeout_seconds)
-    return target
-
-
-def render_horizontal_clip(
-    source: str | Path,
-    target: str | Path,
-    start: float,
-    end: float,
-    *,
-    burn_captions: bool = False,
-    subtitle_path: str | Path | None = None,
-    normalize_audio: bool = True,
-) -> Path:
-    """Cut ``[start, end]`` keeping the source aspect ratio, capped at 1080p.
-
-    Used when a caller asks for a non-vertical export (``vertical=false``).
-    """
-    settings = get_settings()
-    target = Path(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-
-    duration = max(0.1, end - start)
-
-    filters = [
-        "scale=1920:1080:force_original_aspect_ratio=decrease",
-        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
-        "setsar=1",
-    ]
-    if burn_captions and subtitle_path:
-        escaped = str(subtitle_path).replace("\\", "\\\\").replace(":", r"\:").replace("'", r"\'")
-        filters.append(f"subtitles='{escaped}'")
+        filters.append(_subtitle_filter(subtitle_path, height, bottom_safe_pixels))
 
     cmd = [
         settings.ffmpeg_bin,
@@ -543,15 +478,77 @@ def render_horizontal_clip(
         "veryfast",
         "-crf",
         "20",
+        "-maxrate",
+        video_bitrate,
+        "-bufsize",
+        video_bitrate,
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
         "-b:a",
-        "192k",
+        audio_bitrate,
         "-movflags",
         "+faststart",
         str(target),
     ]
     _run(cmd, timeout=settings.render_timeout_seconds)
     return target
+
+
+# libass scales ASS style values by frame_height / this default script height
+# when the subtitle file has no header of its own, which an SRT never does.
+_LIBASS_SCRIPT_HEIGHT = 288
+
+
+def _subtitle_filter(
+    subtitle_path: str | Path, frame_height: int, bottom_safe_pixels: int
+) -> str:
+    """Build the ``subtitles`` filter, lifted above the platform's UI.
+
+    ``MarginV`` is not in output pixels. An SRT file carries no ASS header, so
+    libass falls back to its default 288-unit script height and scales styles by
+    ``frame_height / 288``. Passing pixel values straight through therefore
+    multiplies the lift by ~6.7 at 1920 tall, which pushes captions off the top
+    of the frame and they disappear entirely. The margin is divided back into
+    libass units so the requested pixel lift is what actually lands.
+    """
+    escaped = (
+        str(subtitle_path)
+        .replace("\\", "\\\\")
+        .replace(":", r"\:")
+        .replace("'", r"\'")
+    )
+    if bottom_safe_pixels <= 0:
+        return f"subtitles='{escaped}'"
+    scale = frame_height / _LIBASS_SCRIPT_HEIGHT
+    margin = max(0, int(round(bottom_safe_pixels / scale)))
+    # The caption is drawn ``MarginV`` units above the bottom edge. A margin at or
+    # beyond the frame height would place it off-screen, so it is capped short of
+    # that in the same units the margin is expressed in.
+    margin = min(margin, int(_LIBASS_SCRIPT_HEIGHT * 0.9))
+    return f"subtitles='{escaped}':force_style='MarginV={margin}'"
+
+
+def render_vertical_clip(
+    source: str | Path,
+    target: str | Path,
+    start: float,
+    end: float,
+    **kwargs,
+) -> Path:
+    """Cut ``[start, end]`` and reframe to a 9:16 vertical clip."""
+    return render_clip(source, target, start, end, **kwargs)
+
+
+def render_horizontal_clip(
+    source: str | Path,
+    target: str | Path,
+    start: float,
+    end: float,
+    **kwargs,
+) -> Path:
+    """Cut ``[start, end]`` and reframe to 1920x1080."""
+    kwargs.setdefault("width", 1920)
+    kwargs.setdefault("height", 1080)
+    return render_clip(source, target, start, end, **kwargs)

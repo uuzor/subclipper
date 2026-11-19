@@ -504,3 +504,49 @@ built clips from invented text. A provider that cannot be constructed now
 raises. This is why Gemini ASR exists: `auto` prefers a hosted speech provider
 when a key is present, and Gemini accepts audio, so one key covers speech and
 vision on a small image.
+
+## Provider selection: which model does which job
+
+Measured on the same 20.4s clip, against the live APIs, not from model
+descriptions:
+
+| Stage | Provider | Result |
+| --- | --- | --- |
+| Transcription | Smallest AI Pulse (`pulse-pro`) | Real word timestamps, 39x realtime on 20s, 185x on 173s |
+| Transcription | Gemini (`gemini-flash-lite`) | Works, but returned no segments intermittently on 120s chunks |
+| Transcription | NVIDIA omni | Transcribes words correctly, **invents the timings** |
+| Vision | NVIDIA `nemotron-3.5-super-vl` | Accurate, ~1.3s per frame |
+| Moment selection | NVIDIA `kimi-k3.1-pro` | Good picks, but ~70s for a 6-line transcript |
+
+**Do not transcribe with a general multimodal model.** The NVIDIA omni model
+does not emit timestamps; its reasoning traces the arithmetic: `"6 words => 2.4
+sec. Start 5.6, end 8.0."` It estimates from word counts. On a 6-segment clip the
+mean start error was 0.21s and the mean end error 0.80s, with one segment 2.33s
+too long. Clipping cuts on those numbers, so the error lands directly on the
+clip boundary, and it gets worse on fast or overlapping speech where word rate
+stops predicting duration. Pulse measures the audio and returns per-word
+`start`/`end`/`confidence`.
+
+**`auto` order for transcription is Smallest, then NVIDIA, then Gemini, then
+Whisper.** `QUICKREEL_TRANSCRIPTION_PROVIDER` pins one explicitly.
+
+**Pulse returns a flat `words` array, not segments.** `_segments_from_words`
+rebuilds sentence-sized cues by cutting on sentence punctuation, a pause over
+0.8s, or a size ceiling. Without that a 2-hour podcast arrives as one segment
+spanning the whole file, and every downstream boundary calculation is useless.
+
+## Platform export targets
+
+`rendering/platforms.py` holds the per-destination spec: canvas, caption safe
+area, bitrate, duration ceiling. `render_clip(..., platform="instagram_reels")`
+selects one; `vertical` still works when no platform is named. Clips longer than
+a platform's ceiling are refused, not truncated, because a clip cut mid-sentence
+is worse than an error the caller can act on.
+
+**`MarginV` is not in output pixels.** An SRT carries no ASS header, so libass
+uses a 288-unit script height and scales by `frame_height / 288`. Passing a pixel
+value straight through multiplies the lift by ~6.7 at 1920 tall, which pushed
+captions off the top of the frame and they disappeared completely. The pixel
+safe area is divided by that scale before being used. `test_caption_safe_area_
+moves_text_above_the_platform_chrome` renders a black frame and reads the rows
+the text occupies, so the conversion is checked against the image.

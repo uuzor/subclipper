@@ -22,13 +22,21 @@ def process_project(self, project_id: str) -> str:  # pragma: no cover - worker 
 
 @shared_task(name="quickreel.render_clip", bind=True, max_retries=0)
 def render_clip(
-    self, clip_id: str, burn_captions: bool = True, vertical: bool = True
+    self,
+    clip_id: str,
+    burn_captions: bool = True,
+    vertical: bool = True,
+    platform: str | None = None,
 ) -> str:  # pragma: no cover - worker path
     from ..rendering.renderer import render_clip_by_id
 
     with session_scope() as session:
         render_clip_by_id(
-            session, clip_id, burn_captions=burn_captions, vertical=vertical
+            session,
+            clip_id,
+            burn_captions=burn_captions,
+            vertical=vertical,
+            platform=platform,
         )
     return clip_id
 
@@ -39,9 +47,15 @@ def enqueue_project(project_id: str) -> None:
 
 
 def enqueue_render(
-    clip_id: str, *, burn_captions: bool = True, vertical: bool = True
+    clip_id: str,
+    *,
+    burn_captions: bool = True,
+    vertical: bool = True,
+    platform: str | None = None,
 ) -> None:
-    render_clip.delay(clip_id, burn_captions=burn_captions, vertical=vertical)
+    render_clip.delay(
+        clip_id, burn_captions=burn_captions, vertical=vertical, platform=platform
+    )
 
 
 @shared_task(name="quickreel.run_due_posts", bind=True, max_retries=0)

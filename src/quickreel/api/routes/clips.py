@@ -15,6 +15,7 @@ from ...db import get_db, session_scope
 from ...logging_setup import get_logger
 from ...models import Clip, ClipStatus, Project, Workspace
 from ...pipeline.tasks import enqueue_render
+from ...rendering import platforms
 from ...rendering.renderer import render_clip, render_clip_by_id
 from ...schemas import ClipOut, RenderRequest
 from ..deps import current_workspace, get_scoped_project
@@ -85,6 +86,13 @@ def render_project_clips(
     get_scoped_project(db, project_id, workspace.id)
     settings = get_settings()
 
+    # Resolve the platform before claiming any clip: an unknown key should fail
+    # the request outright, not mark clips as rendering and then fail each one.
+    try:
+        platforms.get_spec(payload.platform) if payload.platform else None
+    except platforms.UnknownPlatform as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     if payload.clip_ids:
         # Both filters: the ids come from the client, so the project scope is
         # what stops a caller rendering another tenant's clip by passing its id.
@@ -117,6 +125,7 @@ def render_project_clips(
                 clip.id,
                 burn_captions=payload.burn_captions,
                 vertical=payload.vertical,
+                platform=payload.platform,
             )
             clip.status = ClipStatus.rendering
         db.commit()
@@ -143,6 +152,7 @@ def render_project_clips(
                 clip_id,
                 burn_captions=payload.burn_captions,
                 vertical=payload.vertical,
+                platform=payload.platform,
             )
         return [_clip_out(clip) for clip in clips]
 
@@ -154,6 +164,7 @@ def render_project_clips(
                 clip,
                 burn_captions=payload.burn_captions,
                 vertical=payload.vertical,
+                platform=payload.platform,
             )
         except Exception as exc:  # noqa: BLE001 - report per-clip failure
             logger.error("render.endpoint_failed", clip_id=clip.id, error=str(exc))
@@ -164,17 +175,48 @@ def render_project_clips(
     return rendered
 
 
-def _render_in_background(clip_id: str, *, burn_captions: bool, vertical: bool) -> None:
+def _render_in_background(
+    clip_id: str,
+    *,
+    burn_captions: bool,
+    vertical: bool,
+    platform: str | None = None,
+) -> None:
     def work() -> None:
         try:
             with session_scope() as session:
                 render_clip_by_id(
-                    session, clip_id, burn_captions=burn_captions, vertical=vertical
+                    session,
+                    clip_id,
+                    burn_captions=burn_captions,
+                    vertical=vertical,
+                    platform=platform,
                 )
         except Exception as exc:  # noqa: BLE001 - the clip records the failure
             logger.error("render.background_failed", clip_id=clip_id, error=str(exc))
 
     threading.Thread(target=work, name=f"render-{clip_id}", daemon=True).start()
+
+
+@router.get("/export-platforms")
+def list_export_platforms() -> list[dict]:
+    """List the export targets a render request may name.
+
+    Clients read this rather than hardcoding the list, so a new destination is a
+    server change and not a client release.
+    """
+    return [
+        {
+            "key": spec.key,
+            "label": spec.label,
+            "width": spec.width,
+            "height": spec.height,
+            "aspect": spec.aspect,
+            "max_seconds": spec.max_seconds,
+            "notes": spec.notes,
+        }
+        for spec in platforms.all_specs()
+    ]
 
 
 @router.get("/clips/{clip_id}/download")

@@ -86,10 +86,22 @@ def get_transcription_provider() -> TranscriptionProvider:
         return FasterWhisperTranscriptionProvider()
     if settings.transcription_provider == "nvidia":
         return NvidiaTranscriptionProvider()
+    if settings.transcription_provider == "smallest":
+        from .providers import SmallestTranscriptionProvider
+
+        return SmallestTranscriptionProvider()
     if settings.transcription_provider == "gemini":
         from .providers import GeminiTranscriptionProvider
 
         return GeminiTranscriptionProvider()
+    # ``auto`` prefers a purpose-built ASR model when a key is present. Pulse
+    # returns real word timestamps; the multimodal models only estimate them.
+    if settings.smallest_api_key:
+        from .providers import SmallestTranscriptionProvider
+
+        return _auto_with_runtime_fallback(
+            "transcription", SmallestTranscriptionProvider, fakes.FakeTranscriptionProvider
+        )
     # ``auto`` prefers hosted speech when a key is present: it needs no model
     # weights, which is the difference between working and not working on a
     # small container.

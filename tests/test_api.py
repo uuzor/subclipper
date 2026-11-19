@@ -450,3 +450,64 @@ def test_chunked_upload_feeds_the_pipeline(auth_client, sample_video):
     assert processed.status_code == 202, processed.text
     assert processed.json()["status"] == "ready", processed.json()
     assert auth_client.get(f"/api/v1/projects/{project_id}/clips").json()
+
+
+def test_render_accepts_a_platform_and_exports_that_canvas(auth_client, sample_video):
+    """Naming a platform must change the real output, not just the metadata."""
+    from quickreel.media import ffmpeg
+
+    project = _create_and_upload(auth_client, sample_video)
+    project_id = project["id"]
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+
+    square = auth_client.post(
+        f"/api/v1/projects/{project_id}/render",
+        json={"max_clips": 1, "platform": "square"},
+    ).json()[0]
+
+    assert square["render_meta"]["platform"] == "square"
+    assert (square["render_meta"]["width"], square["render_meta"]["height"]) == (1080, 1080)
+    info = ffmpeg.probe(square["render_path"])
+    assert (info.width, info.height) == (1080, 1080)
+
+    # Switching platform must not leave the previous render in place: the file
+    # name is platform-specific so both exports can coexist.
+    reels = auth_client.post(
+        f"/api/v1/projects/{project_id}/render",
+        json={"max_clips": 1, "platform": "instagram_reels"},
+    ).json()[0]
+    assert reels["render_meta"]["platform"] == "instagram_reels"
+    reels_info = ffmpeg.probe(reels["render_path"])
+    assert (reels_info.width, reels_info.height) == (1080, 1920)
+
+
+def test_render_rejects_an_unknown_platform_before_touching_clips(
+    auth_client, sample_video
+):
+    """A bad platform must fail the request outright.
+
+    Validating after the clips are claimed would leave them marked ``rendering``
+    with nothing rendering them, so they would never settle.
+    """
+    project = _create_and_upload(auth_client, sample_video)
+    project_id = project["id"]
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+
+    response = auth_client.post(
+        f"/api/v1/projects/{project_id}/render",
+        json={"max_clips": 1, "platform": "myspace"},
+    )
+    assert response.status_code == 400
+    assert "myspace" in response.json()["detail"]
+
+    clips = auth_client.get(f"/api/v1/projects/{project_id}/clips").json()
+    assert all(clip["status"] != "rendering" for clip in clips)
+
+
+def test_export_platforms_lists_the_available_targets(auth_client):
+    response = auth_client.get("/api/v1/export-platforms")
+    assert response.status_code == 200
+    platforms = {item["key"]: item for item in response.json()}
+    assert {"tiktok", "youtube_shorts", "instagram_reels", "youtube"} <= set(platforms)
+    assert platforms["tiktok"]["aspect"] == "1080x1920"
+    assert platforms["youtube"]["aspect"] == "1920x1080"

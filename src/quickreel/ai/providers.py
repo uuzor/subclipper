@@ -12,6 +12,7 @@ import contextlib
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 from ..config import get_settings
 from ..logging_setup import get_logger
@@ -313,6 +314,150 @@ class GeminiTranscriptionProvider:
             request_options={"timeout": self._settings.vision_timeout_seconds},
         )
         return getattr(response, "text", "") or ""
+
+
+class SmallestTranscriptionProvider:
+    """Speech recognition through Smallest AI's Pulse models.
+
+    Pulse is a purpose-built ASR model that returns real word-level timestamps,
+    which is what clipping actually depends on. The general multimodal models
+    offered by the other providers do not produce timings: asked for them, the
+    NVIDIA omni model reasons "6 words => 2.4 sec" and estimates, which shifts
+    every clip boundary away from the moment it was chosen for.
+
+    One request covers a whole file - the service chunks server-side and returns
+    a single timeline - so no client-side chunking is needed.
+    """
+
+    name = "smallest-pulse"
+
+    def __init__(self, *, session: Any | None = None) -> None:
+        settings = get_settings()
+        self._settings = settings
+        if not settings.smallest_api_key:
+            raise ProviderUnavailable("QUICKREEL_SMALLEST_API_KEY is not set.")
+        self._session = session
+
+    def transcribe(self, audio_path: Path) -> TranscriptResult:
+        import requests
+
+        settings = self._settings
+        audio_path = Path(audio_path)
+        session = self._session or requests.Session()
+        params = {
+            "model": settings.smallest_stt_model,
+            "language": settings.smallest_stt_language,
+            "word_timestamps": "true",
+        }
+        try:
+            response = session.post(
+                f"{settings.smallest_base_url}/waves/v1/stt/",
+                params=params,
+                headers={
+                    "Authorization": f"Bearer {settings.smallest_api_key}",
+                    "Content-Type": "application/octet-stream",
+                },
+                data=audio_path.read_bytes(),
+                timeout=settings.smallest_timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001 - network faults are provider faults
+            raise ProviderUnavailable(f"Smallest AI request failed: {exc}") from exc
+
+        if response.status_code != 200:
+            raise ProviderUnavailable(
+                f"Smallest AI returned HTTP {response.status_code}: {response.text[:300]}"
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ProviderUnavailable("Smallest AI returned a non-JSON body") from exc
+
+        if payload.get("status") not in (None, "success"):
+            raise ProviderUnavailable(f"Smallest AI status {payload.get('status')!r}")
+
+        words = [
+            word
+            for word in payload.get("words") or []
+            if isinstance(word, dict) and word.get("word")
+        ]
+        segments = _segments_from_words(words)
+        if not segments:
+            # Pulse occasionally returns text with no word array when timestamps
+            # are unavailable. Keep the text rather than failing the whole run,
+            # but say so: a transcript with no timings cannot drive clipping.
+            text = str(payload.get("transcription") or "").strip()
+            if not text:
+                raise ProviderUnavailable("Smallest AI returned no transcription")
+            logger.warning("provider.no_word_timestamps", provider=self.name)
+            segments = [TranscriptSegment(start=0.0, end=0.0, text=text, words=[])]
+
+        return TranscriptResult(
+            language=str(payload.get("language") or settings.smallest_stt_language),
+            text=str(payload.get("transcription") or "").strip()
+            or " ".join(segment.text for segment in segments).strip(),
+            segments=segments,
+            provider=self.name,
+        )
+
+
+# A sentence-ending mark ends a caption cue; a pause longer than this also ends
+# one, because speakers rarely run past it without a breath.
+_SENTENCE_END = (".", "!", "?")
+_SEGMENT_PAUSE_SECONDS = 0.8
+# Hard ceiling so a rambling speaker still gets cue-sized segments.
+_SEGMENT_MAX_SECONDS = 12.0
+_SEGMENT_MAX_WORDS = 40
+
+
+def _segments_from_words(words: list[dict]) -> list[TranscriptSegment]:
+    """Group word timings into sentence-like cues.
+
+    Pulse returns one flat word array. Clipping needs segments bounded by
+    sentence and pause, not one blob covering the whole file, so cues are cut on
+    sentence punctuation, a long pause, or a size ceiling.
+    """
+    segments: list[TranscriptSegment] = []
+    current: list[dict] = []
+
+    def flush() -> None:
+        if not current:
+            return
+        text = " ".join(str(word["word"]) for word in current).strip()
+        if text:
+            segments.append(
+                TranscriptSegment(
+                    start=float(current[0]["start"]),
+                    end=float(current[-1]["end"]),
+                    text=text,
+                    words=[
+                        {
+                            "word": str(word["word"]),
+                            "start": float(word["start"]),
+                            "end": float(word["end"]),
+                        }
+                        for word in current
+                    ],
+                )
+            )
+        current.clear()
+
+    for word in words:
+        if "start" not in word or "end" not in word:
+            continue
+        if current:
+            gap = float(word["start"]) - float(current[-1]["end"])
+            span = float(word["end"]) - float(current[0]["start"])
+            if (
+                gap > _SEGMENT_PAUSE_SECONDS
+                or span > _SEGMENT_MAX_SECONDS
+                or len(current) >= _SEGMENT_MAX_WORDS
+            ):
+                flush()
+        current.append(word)
+        if str(word["word"]).rstrip().endswith(_SENTENCE_END):
+            flush()
+    flush()
+    return segments
 
 
 class NvidiaTranscriptionProvider:

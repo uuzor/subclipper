@@ -185,6 +185,9 @@ class RenderRequest(BaseModel):
     max_clips: int = Field(default=3, ge=1, le=20)
     vertical: bool = True
     burn_captions: bool = True
+    # Destination format. When omitted, ``vertical`` picks between the 9:16 and
+    # 16:9 exports, which is the behaviour callers had before platforms existed.
+    platform: str | None = None
 
 
 class PublishTargetIn(BaseModel):
