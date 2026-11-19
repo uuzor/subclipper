@@ -580,7 +580,7 @@ def test_smallest_provider_parses_a_real_response_shape(monkeypatch, tmp_path):
 
     class FakeSession:
         def post(self, url, **kwargs):
-            assert url.endswith("/waves/v1/stt/")
+            assert url.endswith("/waves/v1/stt")
             assert kwargs["params"]["word_timestamps"] == "true"
             assert kwargs["headers"]["Authorization"].startswith("Bearer ")
             return FakeResponse()
@@ -604,3 +604,66 @@ def test_smallest_provider_parses_a_real_response_shape(monkeypatch, tmp_path):
     assert result.segments[0].end == 1.12
     assert result.segments[1].end == 3.2
     assert sum(len(segment.words) for segment in result.segments) == 4
+
+
+def test_smallest_provider_does_not_need_the_requests_package(tmp_path, monkeypatch):
+    """The hosted image installs ``hosted-ai``, which does not include
+    ``requests``. An earlier version imported it inside ``transcribe``, so the
+    provider constructed fine and then failed with ModuleNotFoundError at the
+    first real request - on every production run, after the upload succeeded.
+    This blocks the import and requires the real code path to still work.
+    """
+    import builtins
+
+    from quickreel.ai.providers import SmallestTranscriptionProvider
+    from quickreel.config import get_settings
+
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "requests" or name.startswith("requests."):
+            raise ModuleNotFoundError("No module named 'requests'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    captured: dict = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "status": "success",
+                "transcription": "A short line of speech.",
+                "language": "en",
+                "words": [
+                    {"word": "A", "start": 0.0, "end": 0.2, "confidence": 0.9},
+                    {"word": "short", "start": 0.2, "end": 0.5, "confidence": 0.9},
+                    {"word": "line", "start": 0.5, "end": 0.8, "confidence": 0.9},
+                    {"word": "of", "start": 0.8, "end": 0.9, "confidence": 0.9},
+                    {"word": "speech.", "start": 0.9, "end": 1.4, "confidence": 0.9},
+                ],
+            }
+
+    class FakeSession:
+        def post(self, url, **kwargs):
+            captured["url"] = url
+            return FakeResponse()
+
+    monkeypatch.setenv("QUICKREEL_SMALLEST_API_KEY", "test-key")
+    get_settings.cache_clear()
+    try:
+        provider = SmallestTranscriptionProvider(session=FakeSession())
+    finally:
+        get_settings.cache_clear()
+
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"RIFF....WAVEfmt ")
+    result = provider.transcribe(audio)
+
+    assert captured["url"].endswith("/waves/v1/stt")
+    assert result.provider == "smallest-pulse"
+    assert result.text
+    assert result.segments

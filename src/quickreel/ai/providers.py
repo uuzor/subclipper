@@ -339,27 +339,39 @@ class SmallestTranscriptionProvider:
         self._session = session
 
     def transcribe(self, audio_path: Path) -> TranscriptResult:
-        import requests
+        import httpx
 
         settings = self._settings
         audio_path = Path(audio_path)
-        session = self._session or requests.Session()
         params = {
             "model": settings.smallest_stt_model,
             "language": settings.smallest_stt_language,
             "word_timestamps": "true",
         }
+        headers = {
+            "Authorization": f"Bearer {settings.smallest_api_key}",
+            "Content-Type": "application/octet-stream",
+        }
+        url = f"{settings.smallest_base_url}/waves/v1/stt"
         try:
-            response = session.post(
-                f"{settings.smallest_base_url}/waves/v1/stt/",
-                params=params,
-                headers={
-                    "Authorization": f"Bearer {settings.smallest_api_key}",
-                    "Content-Type": "application/octet-stream",
-                },
-                data=audio_path.read_bytes(),
-                timeout=settings.smallest_timeout_seconds,
-            )
+            if self._session is not None:
+                response = self._session.post(
+                    url,
+                    params=params,
+                    headers=headers,
+                    content=audio_path.read_bytes(),
+                    timeout=settings.smallest_timeout_seconds,
+                )
+            else:
+                # httpx is already a dependency, so the hosted image can run this
+                # provider without installing anything extra.
+                with httpx.Client(timeout=settings.smallest_timeout_seconds) as client:
+                    response = client.post(
+                        url,
+                        params=params,
+                        headers=headers,
+                        content=audio_path.read_bytes(),
+                    )
         except Exception as exc:  # noqa: BLE001 - network faults are provider faults
             raise ProviderUnavailable(f"Smallest AI request failed: {exc}") from exc
 
