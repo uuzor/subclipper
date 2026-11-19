@@ -462,3 +462,29 @@ every request returns 502 until it restarts. `QUICKREEL_RENDER_THREADS`
 Related: `/healthz` is the liveness route and `/readyz` names the provider
 behind each stage. The SPA catch-all answers unknown paths with HTML, so a
 health check pointed at `/health` passes on static files alone.
+
+## Hosted deployment notes
+
+**Request-scoped work must not outlive the request.** Both `/projects/{id}/process`
+and `/projects/{id}/clips/render` used to run their whole job inside the HTTP
+request. A hosting proxy times out around 80s and answers 502 while the work
+keeps running, so the caller sees a failure for work that actually succeeds.
+Both now have an opt-in thread path (`QUICKREEL_PROCESS_IN_BACKGROUND`,
+`QUICKREEL_RENDER_IN_BACKGROUND`), off by default so local runs and the suite
+keep the synchronous contract. The thread opens its own session through
+`session_scope()`: a SQLAlchemy session is not thread-safe and the request's
+session closes when the response is sent.
+
+**The image installs `hosted-ai`, not `ai`.** The full `ai` extra is ~1.1GB
+(faster-whisper pulls ctranslate2; librosa pulls scipy, llvmlite and numba) and
+does not fit a 512MB instance. `hosted-ai` carries only what hosted vision and
+reasoning need. Build with `--build-arg INSTALL_AI=1` when transcription must
+run in the container.
+
+**`allow_provider_fallback=false` must also cover the constructor.** The
+construction-time fallback ignored that flag, so a deploy whose image lacked an
+optional dependency silently transcribed every video with the fake provider and
+built clips from invented text. A provider that cannot be constructed now
+raises. This is why Gemini ASR exists: `auto` prefers a hosted speech provider
+when a key is present, and Gemini accepts audio, so one key covers speech and
+vision on a small image.
