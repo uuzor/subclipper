@@ -9,7 +9,6 @@ is only required when a provider is actually selected. Providers raise a clear
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import json
 import math
 from pathlib import Path
@@ -684,85 +683,96 @@ class NvidiaMomentProvider(LLMMomentProvider):
         return _extract_json(content)
 
 
-class LibrosaAudioAnalyzer:
-    """Detects laughter-like bursts, emphasis and silence from the audio signal."""
+class SignalAudioAnalyzer:
+    """Detects emphasis and silence from the audio envelope.
 
-    name = "librosa"
+    Built on ffmpeg's ``astats`` rather than librosa: the only thing this class
+    needs is a per-window loudness envelope, and librosa drags in numpy, scipy,
+    llvmlite and numba - about 1GB - to compute one percentile. ffmpeg is
+    already a hard dependency of the image.
+
+    Deliberately does not report laughter. astats offers crest factor and a
+    "flat factor" that look like they should separate laughter from speech, but
+    on real material they do not: crest is reported on a scale that varies by
+    six orders of magnitude between files, and flat factor is constant. A
+    zero-crossing threshold alone matched 13% of ordinary speech frames, so
+    shipping it would have injected invented reactions into clip boundaries and
+    viral scores. Laughter needs a trained classifier over real laugh samples,
+    not a threshold on a loudness envelope.
+    """
+
+    name = "ffmpeg-audio"
 
     def __init__(self, hop_seconds: float = 0.5) -> None:
-        # Probe here, not in analyze(): the registry chooses between this class
-        # and the fake by catching ProviderUnavailable from the constructor, so a
-        # check inside analyze() made the fallback unreachable and failed the
-        # whole project on an image built without the ai extra.
-        if importlib.util.find_spec("librosa") is None:  # pragma: no cover - optional extra
-            raise ProviderUnavailable(
-                "librosa is not installed. Install with `pip install -e '.[ai]'`."
-            )
         self._hop = hop_seconds
 
     def analyze(self, audio_path: Path) -> list[AudioEvent]:
-        import librosa  # type: ignore import-not-found
-        import numpy as np  # type: ignore import-not-found
-
-        samples, sample_rate = librosa.load(str(audio_path), sr=16000, mono=True)
-        rms = librosa.feature.rms(y=samples, hop_length=int(sample_rate * self._hop))[0]
-        if rms.size == 0:
+        frames = ffmpeg.audio_envelope(audio_path, window_seconds=self._hop)
+        if not frames:
             return []
-        threshold = float(np.percentile(rms, 85))
-        silence_threshold = float(np.percentile(rms, 10))
+
+        levels = sorted(frame.rms for frame in frames)
+        # Percentile by index: avoids numpy for what is a sorted-list lookup.
+        loud_threshold = levels[min(len(levels) - 1, int(len(levels) * 0.85))]
+        quiet_threshold = levels[min(len(levels) - 1, int(len(levels) * 0.10))]
 
         events: list[AudioEvent] = []
-        in_burst = False
-        burst_start = 0.0
-        burst_peak = 0.0
-        for index, value in enumerate(rms):
-            time = index * self._hop
-            if value >= threshold and not in_burst:
-                in_burst = True
-                burst_start = time
-                burst_peak = float(value)
-            elif value >= threshold:
-                # Track the loudest frame *inside* the burst. Reading the value at
-                # the closing frame measured the post-burst decay instead.
-                burst_peak = max(burst_peak, float(value))
-            elif in_burst:
-                in_burst = False
-                if time - burst_start >= 0.6:
+        events.extend(self._bursts(frames, loud_threshold, "emphasis"))
+        events.extend(self._silences(frames, quiet_threshold))
+        events.sort(key=lambda event: event.start)
+        return events
+
+    def _bursts(
+        self, frames: list[ffmpeg.AudioFrame], threshold: float, kind: str
+    ) -> list[AudioEvent]:
+        events: list[AudioEvent] = []
+        start: float | None = None
+        peak = 0.0
+        for frame in frames:
+            if frame.rms >= threshold:
+                if start is None:
+                    start = frame.time
+                    peak = frame.peak
+                else:
+                    # Track the loudest frame inside the burst; reading the
+                    # closing frame measured the post-burst decay instead.
+                    peak = max(peak, frame.peak)
+            elif start is not None:
+                if frame.time - start >= 0.6:
                     events.append(
                         AudioEvent(
-                            kind="emphasis",
-                            start=burst_start,
-                            end=time,
-                            intensity=min(1.0, burst_peak / (threshold or 1.0)),
+                            kind=kind,
+                            start=start,
+                            end=frame.time,
+                            intensity=min(1.0, max(0.0, (peak - threshold) / 12.0 + 0.5)),
                         )
                     )
-        # Collapse contiguous quiet frames into a single silence event.
-        silence_start: float | None = None
-        for index, value in enumerate(rms):
-            time = index * self._hop
-            if value <= silence_threshold:
-                if silence_start is None:
-                    silence_start = time
-            elif silence_start is not None:
+                start = None
+        return events
+
+    def _silences(
+        self, frames: list[ffmpeg.AudioFrame], threshold: float
+    ) -> list[AudioEvent]:
+        events: list[AudioEvent] = []
+        start: float | None = None
+        for frame in frames:
+            if frame.rms <= threshold:
+                if start is None:
+                    start = frame.time
+            elif start is not None:
                 events.append(
-                    AudioEvent(
-                        kind="silence",
-                        start=silence_start,
-                        end=time,
-                        intensity=0.0,
-                    )
+                    AudioEvent(kind="silence", start=start, end=frame.time, intensity=0.0)
                 )
-                silence_start = None
-        if silence_start is not None:
+                start = None
+        if start is not None and frames:
             events.append(
                 AudioEvent(
                     kind="silence",
-                    start=silence_start,
-                    end=len(rms) * self._hop,
+                    start=start,
+                    end=frames[-1].time + self._hop,
                     intensity=0.0,
                 )
             )
-        events.sort(key=lambda event: event.start)
         return events
 
 

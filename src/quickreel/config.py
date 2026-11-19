@@ -110,6 +110,10 @@ class Settings(BaseSettings):
     # OOM killer takes the whole service down mid-render.
     render_threads: int = 2
     max_upload_mb: int = 2048
+    # Chunk size advertised to clients for resumable uploads. Cloudflare rejects
+    # request bodies over 100MiB, so chunks must stay comfortably below that or
+    # large uploads die at the proxy with an HTML 413 the app never sees.
+    upload_chunk_mb: int = 8
 
     # Remote URL ingestion
     url_ingestion_enabled: bool = True
@@ -341,6 +345,14 @@ class Settings(BaseSettings):
         return self.max_upload_mb * 1024 * 1024
 
     @property
+    def upload_chunk_bytes(self) -> int:
+        return max(self.upload_chunk_mb, 1) * 1024 * 1024
+
+    @property
+    def upload_parts_dir(self) -> Path:
+        return self.data_dir / "upload-parts"
+
+    @property
     def allowed_source_host_list(self) -> tuple[str, ...]:
         return tuple(part.strip() for part in self.allowed_source_hosts.split(",") if part.strip())
 
@@ -350,6 +362,7 @@ class Settings(BaseSettings):
             self.uploads_dir,
             self.renders_dir,
             self.artifacts_dir,
+            self.upload_parts_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 

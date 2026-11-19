@@ -228,6 +228,117 @@ def detect_silences(
     return silences
 
 
+# astats reports -inf for digital silence; clamp to a finite floor instead.
+_SILENCE_DB = -120.0
+
+
+@dataclass(slots=True)
+class AudioFrame:
+    """One analysis window of the audio envelope.
+
+    Levels are dBFS. ``crest`` is peak-over-RMS, ``flatness`` and ``entropy``
+    come from astats, and ``zcr`` is the zero-crossing rate (0..1).
+    """
+
+    time: float
+    rms: float
+    peak: float
+    crest: float
+    flatness: float
+    entropy: float
+    zcr: float
+
+
+def audio_envelope(
+    source: str | Path,
+    window_seconds: float = 0.5,
+    sample_rate: int = 16000,
+) -> list[AudioFrame]:
+    """Return per-window loudness and spectral-shape statistics.
+
+    Uses ffmpeg's ``astats`` rather than librosa, so audio analysis needs no
+    numpy, scipy or numba - about 1GB of dependencies for one function. Only
+    loudness is measured here. astats also reports crest factor and a
+    "flat factor", but on real material those do not separate laughter from
+    speech (see ``SignalAudioAnalyzer``), so they are recorded and unused.
+    """
+    settings = get_settings()
+    samples = max(int(sample_rate * window_seconds), 1)
+    result = subprocess.run(
+        [
+            settings.ffmpeg_bin,
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            str(source),
+            "-vn",
+            "-af",
+            f"aresample={sample_rate},asetnsamples=n={samples}:p=0,"
+            "astats=metadata=1:reset=1,ametadata=print:file=-",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=settings.render_timeout_seconds,
+    )
+
+    frames: list[AudioFrame] = []
+    current_time: float | None = None
+    values: dict[str, float] = {}
+
+    def flush() -> None:
+        if current_time is None or "RMS_level" not in values:
+            return
+        # Digital silence makes astats emit -inf. Callers take percentiles and
+        # averages, where an infinity poisons the whole result, so floor it.
+        def level(name: str) -> float:
+            value = values.get(name, _SILENCE_DB)
+            return _SILENCE_DB if value != value or value == float("-inf") else value
+
+        frames.append(
+            AudioFrame(
+                time=current_time,
+                rms=level("RMS_level"),
+                peak=level("Peak_level"),
+                crest=values.get("Crest_factor", 0.0),
+                flatness=values.get("Flat_factor", 0.0),
+                entropy=values.get("Entropy", 0.0),
+                zcr=values.get("Zero_crossings_rate", 0.0),
+            )
+        )
+
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if line.startswith("frame:"):
+            flush()
+            values = {}
+            marker = "pts_time:"
+            current_time = None
+            if marker in line:
+                try:
+                    current_time = float(line.split(marker, 1)[1].split()[0])
+                except (IndexError, ValueError):
+                    current_time = None
+            continue
+        if "=" not in line:
+            continue
+        key, _, raw = line.partition("=")
+        # astats reports per-channel keys first (``astats.1.RMS_level``) and then
+        # an Overall duplicate. Prefer the channel key and skip the duplicate so
+        # a stereo file does not halve the envelope resolution.
+        if ".Overall." in key:
+            continue
+        name = key.rsplit(".", 1)[-1]
+        try:
+            values[name] = float(raw)
+        except ValueError:
+            continue
+    flush()
+    return frames
+
+
 def extract_frames(
     source: str | Path,
     target_dir: str | Path,

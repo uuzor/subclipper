@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import threading
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
@@ -23,6 +25,9 @@ from ...schemas import (
     ProjectDetailOut,
     ProjectOut,
     RemoteProbeOut,
+    UploadInitIn,
+    UploadInitOut,
+    UploadStatusOut,
     UrlIngestIn,
 )
 from ..deps import current_workspace, get_scoped_project
@@ -185,6 +190,183 @@ def upload_video(
     project.error = None
     db.commit()
     logger.info("upload.stored", project_id=project.id, bytes=size)
+    return project
+
+
+def settings_uploads_path(project_id: str, filename: str | None) -> Path:
+    """Final location for a project's uploaded media."""
+    settings = get_settings()
+    return settings.uploads_dir / f"{project_id}{_safe_suffix(filename)}"
+
+
+def _upload_part_path(project_id: str, upload_id: str) -> Path:
+    """Where a chunked upload accumulates before it becomes the media asset."""
+    settings = get_settings()
+    safe_id = "".join(ch for ch in upload_id if ch.isalnum() or ch in "-_")
+    if not safe_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid upload id"
+        )
+    return settings.upload_parts_dir / f"{project_id}-{safe_id}.part"
+
+
+def _upload_meta_path(project_id: str, upload_id: str) -> Path:
+    """Sidecar recording the declared size, so a resume can report progress."""
+    return _upload_part_path(project_id, upload_id).with_suffix(".json")
+
+
+def _read_upload_total(project_id: str, upload_id: str) -> int:
+    meta = _upload_meta_path(project_id, upload_id)
+    try:
+        return int(json.loads(meta.read_text())["total_bytes"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0
+
+
+@router.post("/{project_id}/upload/init", response_model=UploadInitOut)
+def init_chunked_upload(
+    project_id: str,
+    payload: UploadInitIn,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> UploadInitOut:
+    """Open a resumable upload and return the chunk size to use.
+
+    Hosting proxies cap the request body - Cloudflare answers anything over
+    100MiB with an HTML 413 that never reaches the app - so a long recording is
+    sent in pieces. The total size is declared here so an oversized file is
+    rejected before any bandwidth is spent.
+    """
+    settings = get_settings()
+    project = get_scoped_project(db, project_id, workspace.id)
+    if payload.total_bytes > settings.max_upload_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"upload exceeds {settings.max_upload_mb} MB limit",
+        )
+    upload_id = uuid.uuid4().hex
+    part = _upload_part_path(project.id, upload_id)
+    part.write_bytes(b"")
+    _upload_meta_path(project.id, upload_id).write_text(
+        json.dumps({"total_bytes": payload.total_bytes, "filename": payload.filename})
+    )
+    logger.info(
+        "upload.init", project_id=project.id, total_bytes=payload.total_bytes, upload_id=upload_id
+    )
+    return UploadInitOut(
+        upload_id=upload_id,
+        chunk_size=settings.upload_chunk_bytes,
+        received_bytes=0,
+    )
+
+
+@router.get("/{project_id}/upload/{upload_id}", response_model=UploadStatusOut)
+def chunked_upload_status(
+    project_id: str,
+    upload_id: str,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> UploadStatusOut:
+    """Report how much of an upload has arrived, so a client can resume."""
+    project = get_scoped_project(db, project_id, workspace.id)
+    part = _upload_part_path(project.id, upload_id)
+    if not part.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown upload")
+    received = part.stat().st_size
+    total = _read_upload_total(project.id, upload_id)
+    return UploadStatusOut(
+        upload_id=upload_id,
+        received_bytes=received,
+        total_bytes=total or received,
+        complete=bool(total) and received >= total,
+    )
+
+
+@router.post("/{project_id}/upload/{upload_id}/chunk", response_model=UploadStatusOut)
+def append_upload_chunk(
+    project_id: str,
+    upload_id: str,
+    offset: int = 0,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> UploadStatusOut:
+    """Append one chunk at ``offset``.
+
+    ``offset`` makes retries safe: a chunk that the client believes failed but
+    the server actually stored is overwritten rather than appended twice, which
+    would silently corrupt the file.
+    """
+    settings = get_settings()
+    project = get_scoped_project(db, project_id, workspace.id)
+    part = _upload_part_path(project.id, upload_id)
+    if not part.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown upload")
+
+    current = part.stat().st_size
+    if offset > current:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"offset {offset} is past the {current} bytes already received",
+        )
+
+    with part.open("r+b") as handle:
+        handle.seek(offset)
+        handle.truncate()
+        while chunk := file.file.read(_CHUNK):
+            handle.write(chunk)
+    received = part.stat().st_size
+    if received > settings.max_upload_bytes:
+        part.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"upload exceeds {settings.max_upload_mb} MB limit",
+        )
+    total = _read_upload_total(project.id, upload_id)
+    return UploadStatusOut(
+        upload_id=upload_id,
+        received_bytes=received,
+        total_bytes=total or received,
+        complete=bool(total) and received >= total,
+    )
+
+
+@router.post("/{project_id}/upload/{upload_id}/complete", response_model=ProjectDetailOut)
+def complete_chunked_upload(
+    project_id: str,
+    upload_id: str,
+    payload: UploadInitIn,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> Project:
+    """Promote the assembled parts to the project's media asset."""
+    project = get_scoped_project(db, project_id, workspace.id)
+    part = _upload_part_path(project.id, upload_id)
+    if not part.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown upload")
+
+    size = part.stat().st_size
+    if size == 0:
+        part.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="upload is empty"
+        )
+
+    destination = settings_uploads_path(project.id, payload.filename)
+    shutil.move(str(part), destination)
+    _upload_meta_path(project.id, upload_id).unlink(missing_ok=True)
+
+    asset = db.scalar(select(MediaAsset).where(MediaAsset.project_id == project.id))
+    if asset is None:
+        asset = MediaAsset(project_id=project.id)
+        db.add(asset)
+    asset.path = str(destination)
+    asset.size_bytes = size
+    project.source_kind = "upload"
+    project.status = ProjectStatus.created
+    project.error = None
+    db.commit()
+    logger.info("upload.completed", project_id=project.id, bytes=size)
     return project
 
 

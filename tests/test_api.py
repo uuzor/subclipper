@@ -259,3 +259,194 @@ def test_process_hands_off_to_a_thread_when_no_worker_exists(
 
     assert detail["status"] == "ready", detail
     assert detail["clips"]
+
+
+def test_chunked_upload_assembles_file_in_order(auth_client, sample_video):
+    """Chunks must reassemble byte-for-byte into the original file.
+
+    A proxy in front of the app caps the request body (Cloudflare rejects
+    anything over 100MiB with an HTML 413 that never reaches the app), so long
+    recordings are sent in pieces. If the pieces are assembled wrong the pipeline
+    later fails on a corrupt container, which is much harder to diagnose.
+    """
+    payload = sample_video.read_bytes()
+    created = auth_client.post("/api/v1/projects", json={"title": "Chunked"})
+    project_id = created.json()["id"]
+
+    init = auth_client.post(
+        f"/api/v1/projects/{project_id}/upload/init",
+        json={"filename": "sample.mp4", "total_bytes": len(payload)},
+    )
+    assert init.status_code == 200, init.text
+    upload_id = init.json()["upload_id"]
+    chunk_size = init.json()["chunk_size"]
+    assert chunk_size > 0
+
+    offset = 0
+    while offset < len(payload):
+        piece = payload[offset : offset + chunk_size]
+        response = auth_client.post(
+            f"/api/v1/projects/{project_id}/upload/{upload_id}/chunk?offset={offset}",
+            files={"file": ("chunk", piece, "application/octet-stream")},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["received_bytes"] == offset + len(piece)
+        offset += len(piece)
+
+    done = auth_client.post(
+        f"/api/v1/projects/{project_id}/upload/{upload_id}/complete",
+        json={"filename": "sample.mp4", "total_bytes": len(payload)},
+    )
+    assert done.status_code == 200, done.text
+    stored = Path(done.json()["media"]["path"])
+    assert stored.read_bytes() == payload
+    assert done.json()["media"]["size_bytes"] == len(payload)
+
+
+def test_chunk_retry_at_same_offset_does_not_duplicate(auth_client, sample_video):
+    """A retried chunk must overwrite, not append.
+
+    Clients cannot tell a dropped response from a dropped request, so they retry
+    the chunk they think failed. Appending twice would silently corrupt the
+    container while every request still returns 200.
+    """
+    created = auth_client.post("/api/v1/projects", json={"title": "Retry"})
+    project_id = created.json()["id"]
+    init = auth_client.post(
+        f"/api/v1/projects/{project_id}/upload/init",
+        json={"filename": "sample.mp4", "total_bytes": 12},
+    )
+    upload_id = init.json()["upload_id"]
+
+    first = auth_client.post(
+        f"/api/v1/projects/{project_id}/upload/{upload_id}/chunk?offset=0",
+        files={"file": ("chunk", b"hello", "application/octet-stream")},
+    )
+    assert first.json()["received_bytes"] == 5
+
+    retry = auth_client.post(
+        f"/api/v1/projects/{project_id}/upload/{upload_id}/chunk?offset=0",
+        files={"file": ("chunk", b"hello", "application/octet-stream")},
+    )
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["received_bytes"] == 5, "a retried chunk must not append"
+
+
+def test_chunk_offset_past_end_is_rejected(auth_client):
+    """An offset beyond what the server holds means the client lost track.
+
+    Accepting it would leave a hole in the file, so the client has to re-check
+    the status and resend from a known offset.
+    """
+    created = auth_client.post("/api/v1/projects", json={"title": "Gap"})
+    project_id = created.json()["id"]
+    init = auth_client.post(
+        f"/api/v1/projects/{project_id}/upload/init",
+        json={"filename": "sample.mp4", "total_bytes": 100},
+    )
+    upload_id = init.json()["upload_id"]
+
+    response = auth_client.post(
+        f"/api/v1/projects/{project_id}/upload/{upload_id}/chunk?offset=50",
+        files={"file": ("chunk", b"data", "application/octet-stream")},
+    )
+    assert response.status_code == 409, response.text
+
+
+def test_chunked_upload_rejects_oversized_file_up_front(auth_client, monkeypatch):
+    """An oversized file must be refused before any bytes are transferred."""
+    from quickreel.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "max_upload_mb", 1)
+    created = auth_client.post("/api/v1/projects", json={"title": "Too big"})
+    project_id = created.json()["id"]
+
+    response = auth_client.post(
+        f"/api/v1/projects/{project_id}/upload/init",
+        json={"filename": "huge.mp4", "total_bytes": 5 * 1024 * 1024},
+    )
+    assert response.status_code == 413, response.text
+
+
+def test_chunked_upload_can_resume_after_interruption(auth_client, sample_video):
+    """A client that drops mid-upload must be able to learn where it stopped.
+
+    Without a truthful total, a resumed client cannot tell a half-sent file from
+    a complete one, and re-sends everything or declares success too early.
+    """
+    payload = sample_video.read_bytes()
+    created = auth_client.post("/api/v1/projects", json={"title": "Resume"})
+    project_id = created.json()["id"]
+    init = auth_client.post(
+        f"/api/v1/projects/{project_id}/upload/init",
+        json={"filename": "sample.mp4", "total_bytes": len(payload)},
+    )
+    upload_id = init.json()["upload_id"]
+    chunk_size = init.json()["chunk_size"]
+
+    # The fixture is smaller than one chunk, so send a deliberately short first
+    # piece to simulate a connection that dropped mid-file.
+    first = payload[: max(1, len(payload) // 3)]
+    auth_client.post(
+        f"/api/v1/projects/{project_id}/upload/{upload_id}/chunk?offset=0",
+        files={"file": ("chunk", first, "application/octet-stream")},
+    )
+
+    status = auth_client.get(f"/api/v1/projects/{project_id}/upload/{upload_id}")
+    assert status.status_code == 200, status.text
+    body = status.json()
+    assert body["received_bytes"] == len(first)
+    assert body["total_bytes"] == len(payload), "the declared total must survive a resume"
+    assert body["complete"] is False
+
+    offset = body["received_bytes"]
+    while offset < len(payload):
+        piece = payload[offset : offset + chunk_size]
+        response = auth_client.post(
+            f"/api/v1/projects/{project_id}/upload/{upload_id}/chunk?offset={offset}",
+            files={"file": ("chunk", piece, "application/octet-stream")},
+        )
+        offset = response.json()["received_bytes"]
+
+    done = auth_client.post(
+        f"/api/v1/projects/{project_id}/upload/{upload_id}/complete",
+        json={"filename": "sample.mp4", "total_bytes": len(payload)},
+    )
+    assert done.status_code == 200, done.text
+    assert Path(done.json()["media"]["path"]).read_bytes() == payload
+
+
+def test_chunked_upload_feeds_the_pipeline(auth_client, sample_video):
+    """A chunk-uploaded file must be indistinguishable from a single-shot upload.
+
+    The point of the chunk path is to get large files past the proxy, not to
+    introduce a second, subtly different kind of media asset.
+    """
+    payload = sample_video.read_bytes()
+    created = auth_client.post("/api/v1/projects", json={"title": "Chunked pipeline"})
+    project_id = created.json()["id"]
+    init = auth_client.post(
+        f"/api/v1/projects/{project_id}/upload/init",
+        json={"filename": "sample.mp4", "total_bytes": len(payload)},
+    )
+    upload_id = init.json()["upload_id"]
+    chunk_size = init.json()["chunk_size"]
+
+    offset = 0
+    while offset < len(payload):
+        piece = payload[offset : offset + chunk_size]
+        response = auth_client.post(
+            f"/api/v1/projects/{project_id}/upload/{upload_id}/chunk?offset={offset}",
+            files={"file": ("chunk", piece, "application/octet-stream")},
+        )
+        offset = response.json()["received_bytes"]
+    auth_client.post(
+        f"/api/v1/projects/{project_id}/upload/{upload_id}/complete",
+        json={"filename": "sample.mp4", "total_bytes": len(payload)},
+    )
+
+    processed = auth_client.post(f"/api/v1/projects/{project_id}/process")
+    assert processed.status_code == 202, processed.text
+    assert processed.json()["status"] == "ready", processed.json()
+    assert auth_client.get(f"/api/v1/projects/{project_id}/clips").json()

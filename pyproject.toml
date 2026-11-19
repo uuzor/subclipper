@@ -24,13 +24,12 @@ ai = [
     # 1.2.x calls, so keep it pinned below 16 until upstream catches up.
     "av<16",
     "google-generativeai>=0.8",
-    "librosa>=0.10",
-    "numpy>=1.26",
 ]
-# Hosted vision/reasoning only. The ``ai`` extra also pulls faster-whisper,
-# which needs ctranslate2 and (via librosa) scipy, llvmlite and numba - about
-# 1.1GB. That does not fit a small hosting instance, and a deployment using
-# hosted speech and vision does not need it.
+# Hosted vision/reasoning only. The ``ai`` extra also pulls faster-whisper and
+# ctranslate2 - about 1GB. That does not fit a small hosting instance, and a
+# deployment using hosted speech and vision does not need it. Audio analysis
+# used to require librosa (and with it numpy, scipy, llvmlite and numba), but it
+# now reads ffmpeg's astats output instead, so no extra carries those.
 hosted-ai = [
     "google-generativeai>=0.8",
     "httpx>=0.27",

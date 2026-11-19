@@ -133,6 +133,33 @@ class ProjectCreateIn(BaseModel):
     authorized_by: str = Field(default="", max_length=320)
 
 
+class UploadInitIn(BaseModel):
+    """Start a chunked upload.
+
+    Hosting proxies in front of the app cap the request body - Cloudflare, for
+    one, rejects anything over 100MiB with a bare HTML 413. Large recordings
+    therefore have to arrive in pieces, so the client declares the total size up
+    front and the server can reject an oversized file before a single byte is
+    transferred.
+    """
+
+    filename: str = Field(default="upload.mp4", max_length=255)
+    total_bytes: int = Field(gt=0)
+
+
+class UploadInitOut(BaseModel):
+    upload_id: str
+    chunk_size: int
+    received_bytes: int = 0
+
+
+class UploadStatusOut(BaseModel):
+    upload_id: str
+    received_bytes: int
+    total_bytes: int
+    complete: bool
+
+
 class UrlIngestIn(BaseModel):
     """Attach a remote video URL to an existing project."""
 

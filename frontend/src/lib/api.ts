@@ -85,8 +85,123 @@ function errorMessage(payload: unknown, status: number): string {
       if (first?.msg) return first.msg;
     }
   }
-  if (typeof payload === "string" && payload) return payload;
+  // A proxy in front of the API answers with its own HTML error page, which is
+  // never useful to show. Explain the status instead.
+  if (typeof payload === "string" && payload && !payload.trimStart().startsWith("<")) {
+    return payload;
+  }
+  if (status === 413) {
+    return "That file is too large to upload. Try a shorter recording or a lower-bitrate export.";
+  }
+  if (status === 0) return "Upload failed — the connection dropped.";
   return `Request failed (${status})`;
+}
+
+/**
+ * Above this size a single request risks being rejected by the hosting proxy
+ * before it ever reaches the API. Cloudflare's limit is 100MiB and its error is
+ * an HTML page, so the app cannot explain what went wrong.
+ */
+const CHUNK_THRESHOLD = 64 * 1024 * 1024;
+
+/** How many times a chunk is retried before the upload is declared failed. */
+const CHUNK_RETRIES = 3;
+
+function uploadSingle(
+  id: string,
+  file: File,
+  onProgress?: (pct: number) => void,
+): Promise<ProjectDetail> {
+  return new Promise<ProjectDetail>((resolve, reject) => {
+    const form = new FormData();
+    form.append("file", file);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${BASE}/projects/${id}/upload`);
+    xhr.withCredentials = true;
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress?.(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      const payload = xhr.responseText ? safeJson(xhr.responseText) : null;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(payload as ProjectDetail);
+      } else {
+        reject(new ApiError(errorMessage(payload, xhr.status), xhr.status));
+      }
+    };
+    xhr.onerror = () =>
+      reject(new ApiError("Upload failed — the connection dropped.", 0));
+    xhr.send(form);
+  });
+}
+
+/** Send one chunk, resolving with how many bytes the server now holds. */
+function sendChunk(
+  projectId: string,
+  uploadId: string,
+  offset: number,
+  blob: Blob,
+): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const form = new FormData();
+    form.append("file", blob, "chunk");
+    const xhr = new XMLHttpRequest();
+    xhr.open(
+      "POST",
+      `${BASE}/projects/${projectId}/upload/${uploadId}/chunk?offset=${offset}`,
+    );
+    xhr.withCredentials = true;
+    xhr.onload = () => {
+      const payload = xhr.responseText ? safeJson(xhr.responseText) : null;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const received = (payload as { received_bytes?: number } | null)?.received_bytes;
+        resolve(typeof received === "number" ? received : offset + blob.size);
+      } else {
+        reject(new ApiError(errorMessage(payload, xhr.status), xhr.status));
+      }
+    };
+    xhr.onerror = () =>
+      reject(new ApiError("Upload failed — the connection dropped.", 0));
+    xhr.send(form);
+  });
+}
+
+async function uploadChunked(
+  id: string,
+  file: File,
+  onProgress?: (pct: number) => void,
+): Promise<ProjectDetail> {
+  const init = await request<{ upload_id: string; chunk_size: number }>(
+    `/projects/${id}/upload/init`,
+    {
+      method: "POST",
+      body: JSON.stringify({ filename: file.name, total_bytes: file.size }),
+    },
+  );
+
+  let offset = 0;
+  while (offset < file.size) {
+    const blob = file.slice(offset, offset + init.chunk_size);
+    let attempt = 0;
+    for (;;) {
+      try {
+        // The server reports the authoritative offset, so a chunk whose
+        // response was lost is not appended twice.
+        offset = await sendChunk(id, init.upload_id, offset, blob);
+        break;
+      } catch (err) {
+        attempt += 1;
+        if (attempt > CHUNK_RETRIES) throw err;
+        await new Promise((r) => setTimeout(r, 400 * attempt));
+      }
+    }
+    onProgress?.(Math.round((offset / file.size) * 100));
+  }
+
+  return request<ProjectDetail>(`/projects/${id}/upload/${init.upload_id}/complete`, {
+    method: "POST",
+    body: JSON.stringify({ filename: file.name, total_bytes: file.size }),
+  });
 }
 
 export const api = {
@@ -139,28 +254,19 @@ export const api = {
   deleteProject: (id: string) =>
     request<void>(`/projects/${id}`, { method: "DELETE" }),
 
+  /**
+   * Upload a video, switching to chunked transfer for large files.
+   *
+   * A proxy in front of the API caps the request body - Cloudflare rejects
+   * anything over 100MiB with an HTML 413 that the app never sees, so a single
+   * request for a podcast episode fails with no useful error. Files above
+   * `CHUNK_THRESHOLD` are therefore sent in pieces, and a piece that fails is
+   * retried from the offset the server reports.
+   */
   uploadVideo: (id: string, file: File, onProgress?: (pct: number) => void) =>
-    new Promise<ProjectDetail>((resolve, reject) => {
-      const form = new FormData();
-      form.append("file", file);
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", `${BASE}/projects/${id}/upload`);
-      xhr.withCredentials = true;
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) onProgress?.(Math.round((e.loaded / e.total) * 100));
-      };
-      xhr.onload = () => {
-        const payload = xhr.responseText ? safeJson(xhr.responseText) : null;
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(payload as ProjectDetail);
-        } else {
-          reject(new ApiError(errorMessage(payload, xhr.status), xhr.status));
-        }
-      };
-      xhr.onerror = () =>
-        reject(new ApiError("Upload failed — the connection dropped.", 0));
-      xhr.send(form);
-    }),
+    file.size > CHUNK_THRESHOLD
+      ? uploadChunked(id, file, onProgress)
+      : uploadSingle(id, file, onProgress),
 
   probeUrl: (source_url: string) =>
     request<RemoteProbe>("/projects/source-url/probe", {

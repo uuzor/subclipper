@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from quickreel.ai import fakes
@@ -19,6 +21,7 @@ from quickreel.ai.registry import (
     get_vision_provider,
 )
 from quickreel.config import get_settings
+from quickreel.media import ffmpeg
 
 
 def test_fake_transcription_is_deterministic():
@@ -69,31 +72,100 @@ def test_fake_moment_provider_tolerates_an_empty_transcript():
     assert result.moments == []
 
 
-def test_audio_analyzer_falls_back_when_librosa_is_missing(monkeypatch):
-    """The registry selects the fake by catching ProviderUnavailable from the
-    constructor, so the missing-extra check has to happen there.
+def test_audio_analyzer_needs_no_optional_dependency(monkeypatch):
+    """The audio analyzer must work on an image with no ``ai`` extra.
 
-    When it lived in analyze(), the constructor always succeeded, the fallback
-    never ran, and every project failed at the audio stage on an image built
-    without the ai extra.
+    It previously required librosa, which drags in numpy, scipy, llvmlite and
+    numba - about 1GB - to compute one percentile. On a hosted image without
+    that extra every project silently scored clips against the fake analyzer's
+    invented laughter events. ffmpeg is already a hard dependency, so the real
+    analyzer is always available.
     """
     import importlib.util
 
     real_find_spec = importlib.util.find_spec
 
-    def no_librosa(name, *args, **kwargs):
-        if name == "librosa":
+    def no_heavy_deps(name, *args, **kwargs):
+        if name in {"librosa", "numpy"}:
             return None
         return real_find_spec(name, *args, **kwargs)
 
-    monkeypatch.setattr(importlib.util, "find_spec", no_librosa)
+    monkeypatch.setattr(importlib.util, "find_spec", no_heavy_deps)
     monkeypatch.setenv("QUICKREEL_TRANSCRIPTION_PROVIDER", "whisper")
     get_settings.cache_clear()
     try:
-        analyzer = get_audio_analyzer()
-        assert analyzer.name == "fake-audio"
+        assert get_audio_analyzer().name == "ffmpeg-audio"
     finally:
         get_settings.cache_clear()
+
+
+def _tone(path, seconds, freq=440, volume=0.5):
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", f"sine=frequency={freq}:duration={seconds}",
+            "-af", f"volume={volume}", str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
+def test_audio_envelope_measures_loudness_without_numpy(tmp_path):
+    """The envelope must track real level changes, not return constants."""
+    loud = _tone(tmp_path / "loud.wav", 3, volume=0.9)
+    quiet = _tone(tmp_path / "quiet.wav", 3, volume=0.02)
+
+    loud_frames = ffmpeg.audio_envelope(loud, window_seconds=0.5)
+    quiet_frames = ffmpeg.audio_envelope(quiet, window_seconds=0.5)
+
+    assert len(loud_frames) >= 5
+    # dBFS is negative, so a louder file has a larger (less negative) mean.
+    loud_mean = sum(frame.rms for frame in loud_frames) / len(loud_frames)
+    quiet_mean = sum(frame.rms for frame in quiet_frames) / len(quiet_frames)
+    assert loud_mean > quiet_mean + 10
+
+
+def test_audio_analyzer_marks_silence_and_emphasis(tmp_path):
+    """Loud passages become emphasis events and quiet ones become silence.
+
+    This is the regression guard for the whole stage: the fake analyzer returned
+    three hardcoded events for every video, so a broken real analyzer looked
+    identical to a working one.
+    """
+    from quickreel.ai.providers import SignalAudioAnalyzer
+
+    path = tmp_path / "mixed.wav"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=8",
+            "-af", "volume=0.9,volume=0.02:enable='between(t,3,5)'",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    events = SignalAudioAnalyzer().analyze(path)
+    kinds = {event.kind for event in events}
+    assert "emphasis" in kinds
+    assert "silence" in kinds
+
+    silence = [event for event in events if event.kind == "silence"]
+    # The muted window is 3s-5s; the detected silence must overlap it.
+    assert any(event.start < 5 and event.end > 3 for event in silence)
+
+
+def test_audio_analyzer_returns_events_inside_the_media(tmp_path):
+    """Events must never point past the end of the file."""
+    from quickreel.ai.providers import SignalAudioAnalyzer
+
+    path = _tone(tmp_path / "short.wav", 4)
+    events = SignalAudioAnalyzer().analyze(path)
+    for event in events:
+        assert 0 <= event.start <= event.end <= 4.5
 
 
 def test_fallback_proxy_switches_to_fake_on_runtime_error():
@@ -408,3 +480,42 @@ def test_construction_failure_raises_when_fallback_is_disabled(monkeypatch):
 
     with pytest.raises(RuntimeError, match="optional dependency missing"):
         get_transcription_provider()
+
+
+def test_audio_analyzer_does_not_invent_laughter(tmp_path):
+    """Plain speech must not be labelled as laughter.
+
+    An earlier version gated laughter on astats' crest factor, which is reported
+    on a scale spanning six orders of magnitude, so the test passed for every
+    frame: 13% of ordinary speech came back as "laughter". That silently moved
+    clip boundaries and inflated the emotional-intensity score, so this pins the
+    honest behaviour - loudness-only analysis - until a real classifier exists.
+    """
+    from quickreel.ai.providers import SignalAudioAnalyzer
+
+    path = _tone(tmp_path / "speechlike.wav", 6, freq=200, volume=0.5)
+    events = SignalAudioAnalyzer().analyze(path)
+    assert not [event for event in events if event.kind == "laughter"]
+
+
+def test_audio_envelope_has_no_infinities(tmp_path):
+    """Digital silence must floor to a finite dB value.
+
+    astats reports -inf for a silent window. Callers sort and average these
+    levels to pick thresholds, and one infinity silently skews every percentile.
+    """
+    path = tmp_path / "silent.wav"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "2", str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    frames = ffmpeg.audio_envelope(path)
+    assert frames
+    for frame in frames:
+        assert frame.rms == frame.rms  # NaN check
+        assert frame.rms != float("-inf")
+        assert frame.peak != float("-inf")

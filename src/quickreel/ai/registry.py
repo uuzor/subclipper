@@ -146,14 +146,16 @@ def get_moment_provider() -> MomentProvider:
 
 
 def get_audio_analyzer():
-    """Audio event detection: real analyser when librosa is importable."""
+    """Audio event detection, computed from ffmpeg's envelope.
+
+    This needs no optional dependency: ffmpeg is a hard requirement of the image,
+    so there is no fallback path to a fake. It previously depended on librosa,
+    which meant every hosted deployment silently scored clips against invented
+    laughter events.
+    """
     settings = get_settings()
     if settings.transcription_provider == "fake":
         return fakes.FakeAudioAnalyzer()
-    from .providers import LibrosaAudioAnalyzer, ProviderUnavailable
+    from .providers import SignalAudioAnalyzer
 
-    try:
-        return LibrosaAudioAnalyzer()
-    except ProviderUnavailable:
-        logger.info("provider.fallback_to_fake", kind="audio")
-        return fakes.FakeAudioAnalyzer()
+    return SignalAudioAnalyzer()
