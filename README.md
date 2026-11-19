@@ -270,15 +270,30 @@ All settings are environment variables prefixed with `QUICKREEL_`. See
 | `QUICKREEL_DOWNLOAD_MAX_HEIGHT` | `1080` | Cap on downloaded resolution |
 | `QUICKREEL_DOWNLOAD_TIMEOUT_SECONDS` | `1800` | Per-download socket timeout |
 | `QUICKREEL_DOWNLOADER_COOKIES_FILE` | empty | Netscape cookies file for logged-in sites (treat as a secret) |
+| `QUICKREEL_DOWNLOADER_COOKIES_TEXT` | empty | The same jar as text, for hosts where you can only set env vars |
 | `QUICKREEL_DOWNLOADER_PROXY` | empty | Proxy URL for yt-dlp |
 
 `auto` selects the real provider when its dependency and credentials are present,
 and otherwise logs the reason and falls back to the deterministic fake.
 
 Some platforms (YouTube in particular) block datacenter IPs, so a download may
-fail with a 403 from a cloud host even though the same link works locally. In
-that case run the downloader through a residential proxy
-(`QUICKREEL_DOWNLOADER_PROXY`) or supply a cookies file.
+fail with a 403 from a cloud host even though the same link works locally. This
+is not a bug in the downloader and it is not specific to one provider: it
+reproduces on Render, on AWS, and on any other cloud IP range. Metadata still
+resolves, so the link looks valid while only the media request is refused.
+
+Two things work:
+
+- **Cookies.** Export a `cookies.txt` from a browser signed in to YouTube, then
+  set `QUICKREEL_DOWNLOADER_COOKIES_TEXT` to its contents (or
+  `QUICKREEL_DOWNLOADER_COOKIES_FILE` to a mounted path). A throwaway account is
+  enough, and the jar is a credential, so treat it as one. It expires; expect to
+  refresh it.
+- **A residential proxy.** Set `QUICKREEL_DOWNLOADER_PROXY`. This costs money
+  per gigabyte and a two-hour podcast is a lot of gigabytes.
+
+Uploading the file always works and is the reliable path. Direct MP4 URLs from
+anywhere other than YouTube work without either workaround.
 
 ## Frontend
 

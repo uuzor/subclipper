@@ -69,16 +69,19 @@ services:
       # AI providers. Without at least one, the pipeline degrades to the
       # deterministic fakes and records that in the project's provider
       # provenance, so a degraded run is visible rather than silent.
-      # NVIDIA NIM is the only provider that covers speech, vision and moment
-      # selection from one endpoint, so it needs no model weights in the image.
+      # NVIDIA NIM covers speech, vision and moment selection from one endpoint
+      # and needs no model weights in the image, so setting this key alone is
+      # enough. The providers stay on ``auto``: they pick NVIDIA when the key is
+      # present and still honour a Gemini or generic LLM key if that is what
+      # the operator set instead.
       - key: QUICKREEL_NVIDIA_API_KEY
         sync: false
-      - key: QUICKREEL_TRANSCRIPTION_PROVIDER
-        value: nvidia
-      - key: QUICKREEL_VISION_PROVIDER
-        value: nvidia
-      - key: QUICKREEL_MOMENT_PROVIDER
-        value: nvidia
+      # YouTube blocks media downloads from datacenter IPs (Render included)
+      # with a bot check, so a cookies jar from a signed-in browser is the
+      # supported fix. Paste the jar's contents here; it is written to an
+      # owner-only temp file at download time.
+      - key: QUICKREEL_DOWNLOADER_COOKIES_TEXT
+        sync: false
       - key: QUICKREEL_GEMINI_API_KEY
         sync: false
       - key: QUICKREEL_LLM_API_KEY
