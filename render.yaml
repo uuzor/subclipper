@@ -70,6 +70,10 @@ services:
       # while ffmpeg keeps working. Off-request, the caller polls clip status.
       - key: QUICKREEL_RENDER_IN_BACKGROUND
         value: "true"
+      # The analysis pipeline is slower than a render, so it needs the same
+      # treatment for the same reason.
+      - key: QUICKREEL_PROCESS_IN_BACKGROUND
+        value: "true"
       # AI providers. Without at least one, the pipeline degrades to the
       # deterministic fakes and records that in the project's provider
       # provenance, so a degraded run is visible rather than silent.

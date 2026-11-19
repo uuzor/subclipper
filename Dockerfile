@@ -21,11 +21,13 @@ ENV PIP_NO_CACHE_DIR=1 \
 WORKDIR /app
 COPY pyproject.toml ./
 COPY src/ ./src/
-# The `ai` extra pulls torch for faster-whisper, which is hundreds of MB and is
-# only needed when transcription runs in this container. Providers are
-# pluggable, so the default image stays lean and a deployment that wants local
-# Whisper builds with --build-arg INSTALL_AI=1.
+# The `ai` extra pulls faster-whisper and librosa, about 1.1GB, and is only
+# needed when transcription and audio analysis run in this container. Providers
+# are pluggable, so the default image stays lean and a deployment that wants
+# local Whisper builds with --build-arg INSTALL_AI=1. Hosted vision and
+# reasoning need only `hosted-ai`, which is small enough for a tiny instance.
 ARG INSTALL_AI=0
+ARG INSTALL_HOSTED_AI=1
 # URL ingestion needs yt-dlp in every image: without it the downloader falls
 # back to a stub that fails every link import with "yt-dlp is not installed on
 # this server". It is a small pure-Python package, unlike the `ai` extra.
@@ -33,6 +35,8 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip \
     && if [ "$INSTALL_AI" = "1" ]; then \
          /opt/venv/bin/pip install ".[ai,download]"; \
+       elif [ "$INSTALL_HOSTED_AI" = "1" ]; then \
+         /opt/venv/bin/pip install ".[hosted-ai,download]"; \
        else \
          /opt/venv/bin/pip install ".[download]"; \
        fi

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import threading
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
@@ -10,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...config import get_settings
-from ...db import get_db
+from ...db import get_db, session_scope
 from ...logging_setup import get_logger
 from ...media.downloader import DownloadError, get_downloader
 from ...media.url_source import BlockedSourceUrl, SourceUrlError, validate_source_url
@@ -210,6 +211,17 @@ def set_project_source_url(
     return project
 
 
+def _process_in_background(project_id: str) -> None:
+    def work() -> None:
+        try:
+            with session_scope() as session:
+                Pipeline(session).run(project_id)
+        except Exception as exc:  # noqa: BLE001 - the project records the failure
+            logger.error("process.background_failed", project_id=project_id, error=str(exc))
+
+    threading.Thread(target=work, name=f"process-{project_id}", daemon=True).start()
+
+
 @router.post("/{project_id}/process", response_model=ProjectOut, status_code=202)
 def process_project(
     project_id: str,
@@ -226,16 +238,30 @@ def process_project(
         raise HTTPException(status_code=400, detail="project has no source URL to download")
 
     settings = get_settings()
-    if settings.task_always_eager:
-        # Run inline so local development needs no broker.
-        try:
-            Pipeline(db).run(project.id)
-        except PipelineError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        db.refresh(project)
-    else:
+    if not settings.task_always_eager:
         enqueue_project(project.id)
         db.refresh(project)
+        return project
+
+    if settings.process_in_background:
+        # Transcribing a long video takes far longer than a hosting proxy's
+        # request timeout, and the proxy answers 502 while the pipeline keeps
+        # running - the caller sees a failure for work that succeeds. Run it in
+        # a thread and let the client poll project status. The thread opens its
+        # own session because a SQLAlchemy session is not thread-safe and this
+        # request's session closes when the response is sent.
+        project.status = ProjectStatus.ingesting
+        db.commit()
+        _process_in_background(project.id)
+        db.refresh(project)
+        return project
+
+    # Run inline so local development needs no broker.
+    try:
+        Pipeline(db).run(project.id)
+    except PipelineError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.refresh(project)
     return project
 
 

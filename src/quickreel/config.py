@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # default so a local run and the test suite keep the synchronous contract
     # where the response body is the finished clip.
     render_in_background: bool = False
+    # Same reasoning for the analysis pipeline, which is slower still: a
+    # transcript plus moment detection on a long video dwarfs any request
+    # timeout. Off by default for the same reason as render_in_background.
+    process_in_background: bool = False
 
     # Provider selection
     transcription_provider: str = "auto"

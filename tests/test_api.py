@@ -224,3 +224,38 @@ def test_render_hands_off_to_a_thread_when_no_worker_exists(
     download = auth_client.get(f"/api/v1/clips/{clip_id}/download")
     assert download.status_code == 200
     assert len(download.content) > 0
+
+
+def test_process_hands_off_to_a_thread_when_no_worker_exists(
+    auth_client, sample_video, settings
+):
+    """Analysis must not run inside the request when it can be avoided.
+
+    Transcribing and analysing a long video takes far longer than a hosting
+    proxy's request timeout, and the proxy answers 502 while the pipeline keeps
+    working. Off-request, the project reports ``processing`` and the client
+    polls, so the test waits for the real pipeline rather than mocking it.
+    """
+    import time
+
+    project = _create_and_upload(auth_client, sample_video)
+    project_id = project["id"]
+
+    settings.process_in_background = True
+    try:
+        response = auth_client.post(f"/api/v1/projects/{project_id}/process")
+    finally:
+        settings.process_in_background = False
+
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] in {"ingesting", "transcribing", "analyzing"}
+
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        detail = auth_client.get(f"/api/v1/projects/{project_id}").json()
+        if detail["status"] in {"ready", "analyze_failed", "transcribe_failed"}:
+            break
+        time.sleep(0.5)
+
+    assert detail["status"] == "ready", detail
+    assert detail["clips"]

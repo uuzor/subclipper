@@ -27,6 +27,14 @@ ai = [
     "librosa>=0.10",
     "numpy>=1.26",
 ]
+# Hosted vision/reasoning only. The ``ai`` extra also pulls faster-whisper,
+# which needs ctranslate2 and (via librosa) scipy, llvmlite and numba - about
+# 1.1GB. That does not fit a small hosting instance, and a deployment using
+# hosted speech and vision does not need it.
+hosted-ai = [
+    "google-generativeai>=0.8",
+    "httpx>=0.27",
+]
 download = [
     "yt-dlp>=2025.1",
 ]
