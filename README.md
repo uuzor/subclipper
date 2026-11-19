@@ -263,6 +263,7 @@ All settings are environment variables prefixed with `QUICKREEL_`. See
 | `QUICKREEL_TRANSCRIPTION_PROVIDER` | `auto` | `auto`, `faster-whisper`, `fake` |
 | `QUICKREEL_VISION_PROVIDER` | `auto` | `auto`, `gemini`, `fake` |
 | `QUICKREEL_MOMENT_PROVIDER` | `auto` | `auto`, `llm`, `fake` |
+| `QUICKREEL_RENDER_THREADS` | `2` | Encoder threads; raise only if the instance has memory for it |
 | `QUICKREEL_MAX_UPLOAD_MB` | `2048` | Upload size limit (also caps downloaded files) |
 | `QUICKREEL_URL_INGESTION_ENABLED` | `true` | Allow importing from a link |
 | `QUICKREEL_ALLOWED_SOURCE_HOSTS` | empty | Comma-separated host allowlist; empty means any public host |

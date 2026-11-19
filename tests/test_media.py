@@ -47,6 +47,33 @@ def test_render_vertical_clip_outputs_9x16(sample_video, tmp_path):
     assert info.has_audio is True
 
 
+def test_render_vertical_clip_caps_encoder_threads(sample_video, tmp_path, monkeypatch):
+    """A container on a many-core host reports that core count, and x264 sizes
+    its frame pools from it. Uncapped, a 512MB instance is OOM-killed mid-render,
+    which takes the whole service down rather than failing one clip."""
+    from quickreel.config import get_settings
+
+    seen: list[list[str]] = []
+    real_run = ffmpeg._run
+
+    def spy(cmd, timeout=None):
+        seen.append(list(cmd))
+        return real_run(cmd, timeout=timeout)
+
+    monkeypatch.setattr(ffmpeg, "_run", spy)
+    get_settings.cache_clear()
+    try:
+        ffmpeg.render_vertical_clip(
+            sample_video, tmp_path / "threaded.mp4", start=2.0, end=4.0
+        )
+    finally:
+        get_settings.cache_clear()
+
+    cmd = seen[-1]
+    assert cmd[cmd.index("-threads") + 1] == "2"
+    assert cmd[cmd.index("-filter_threads") + 1] == "2"
+
+
 def test_render_vertical_clip_burns_captions(sample_video, tmp_path):
     subtitle = tmp_path / "clip.srt"
     subtitle.write_text(

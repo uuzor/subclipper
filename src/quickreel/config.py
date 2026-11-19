@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
     render_timeout_seconds: int = 900
+    # Cap on encoder threads. x264 sizes its frame pools from the reported core
+    # count, and a container on a many-core host inherits that number even when
+    # its memory limit is far smaller - 16 threads needs well over 512MB and the
+    # OOM killer takes the whole service down mid-render.
+    render_threads: int = 2
     max_upload_mb: int = 2048
 
     # Remote URL ingestion

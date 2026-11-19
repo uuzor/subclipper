@@ -314,6 +314,10 @@ def render_vertical_clip(
     cmd += [
         "-vf",
         ",".join(filters),
+        "-threads",
+        str(settings.render_threads),
+        "-filter_threads",
+        str(settings.render_threads),
         "-c:v",
         "libx264",
         "-preset",
@@ -378,6 +382,10 @@ def render_horizontal_clip(
     cmd += [
         "-vf",
         ",".join(filters),
+        "-threads",
+        str(settings.render_threads),
+        "-filter_threads",
+        str(settings.render_threads),
         "-c:v",
         "libx264",
         "-preset",

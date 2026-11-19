@@ -54,6 +54,19 @@ Scale out in this order:
    `celery -A quickreel.pipeline.celery_app.celery_app worker`, and a third
    running `... beat` if the publishing and metrics schedules should fire.
 
+### Memory, and why the renderer caps its threads
+
+A 512MB instance is enough to serve and analyze, but not to encode with every
+core the host reports. x264 sizes its frame pools from the detected core count,
+and a container inherits the host's count regardless of its own memory limit:
+16 threads on a 512MB instance is OOM-killed mid-render, and because the encoder
+runs in the web process the OOM killer takes the whole service down instead of
+failing one clip.
+
+`QUICKREEL_RENDER_THREADS` (default `2`) caps both the encoder and the filter
+graph. Two threads render 1080x1920 comfortably inside 512MB. Raise it only
+alongside the instance size.
+
 ### Image size
 
 The default image omits the `ai` extra, which keeps torch and Whisper out of the
