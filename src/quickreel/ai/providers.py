@@ -8,6 +8,7 @@ is only required when a provider is actually selected. Providers raise a clear
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
@@ -286,16 +287,19 @@ class LibrosaAudioAnalyzer:
     name = "librosa"
 
     def __init__(self, hop_seconds: float = 0.5) -> None:
+        # Probe here, not in analyze(): the registry chooses between this class
+        # and the fake by catching ProviderUnavailable from the constructor, so a
+        # check inside analyze() made the fallback unreachable and failed the
+        # whole project on an image built without the ai extra.
+        if importlib.util.find_spec("librosa") is None:  # pragma: no cover - optional extra
+            raise ProviderUnavailable(
+                "librosa is not installed. Install with `pip install -e '.[ai]'`."
+            )
         self._hop = hop_seconds
 
     def analyze(self, audio_path: Path) -> list[AudioEvent]:
-        try:
-            import librosa  # type: ignore import-not-found
-            import numpy as np  # type: ignore import-not-found
-        except ImportError as exc:  # pragma: no cover - optional extra
-            raise ProviderUnavailable(
-                "librosa is not installed. Install with `pip install -e '.[ai]'`."
-            ) from exc
+        import librosa  # type: ignore import-not-found
+        import numpy as np  # type: ignore import-not-found
 
         samples, sample_rate = librosa.load(str(audio_path), sr=16000, mono=True)
         rms = librosa.feature.rms(y=samples, hop_length=int(sample_rate * self._hop))[0]

@@ -18,6 +18,7 @@ from quickreel.ai.registry import (
     get_transcription_provider,
     get_vision_provider,
 )
+from quickreel.config import get_settings
 
 
 def test_fake_transcription_is_deterministic():
@@ -66,6 +67,33 @@ def test_fake_moment_provider_tolerates_an_empty_transcript():
     empty = TranscriptResult(language="en", text="", provider="unit", segments=[])
     result = fakes.FakeMomentProvider().detect(empty, VisualAnalysis(), [])
     assert result.moments == []
+
+
+def test_audio_analyzer_falls_back_when_librosa_is_missing(monkeypatch):
+    """The registry selects the fake by catching ProviderUnavailable from the
+    constructor, so the missing-extra check has to happen there.
+
+    When it lived in analyze(), the constructor always succeeded, the fallback
+    never ran, and every project failed at the audio stage on an image built
+    without the ai extra.
+    """
+    import importlib.util
+
+    real_find_spec = importlib.util.find_spec
+
+    def no_librosa(name, *args, **kwargs):
+        if name == "librosa":
+            return None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", no_librosa)
+    monkeypatch.setenv("QUICKREEL_TRANSCRIPTION_PROVIDER", "whisper")
+    get_settings.cache_clear()
+    try:
+        analyzer = get_audio_analyzer()
+        assert analyzer.name == "fake-audio"
+    finally:
+        get_settings.cache_clear()
 
 
 def test_fallback_proxy_switches_to_fake_on_runtime_error():
