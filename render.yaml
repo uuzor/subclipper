@@ -69,6 +69,16 @@ services:
       # AI providers. Without at least one, the pipeline degrades to the
       # deterministic fakes and records that in the project's provider
       # provenance, so a degraded run is visible rather than silent.
+      # NVIDIA NIM is the only provider that covers speech, vision and moment
+      # selection from one endpoint, so it needs no model weights in the image.
+      - key: QUICKREEL_NVIDIA_API_KEY
+        sync: false
+      - key: QUICKREEL_TRANSCRIPTION_PROVIDER
+        value: nvidia
+      - key: QUICKREEL_VISION_PROVIDER
+        value: nvidia
+      - key: QUICKREEL_MOMENT_PROVIDER
+        value: nvidia
       - key: QUICKREEL_GEMINI_API_KEY
         sync: false
       - key: QUICKREEL_LLM_API_KEY

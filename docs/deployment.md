@@ -13,7 +13,10 @@ uploads and renders. `Dockerfile` and `render.yaml` are the whole configuration.
      `https://clipviralmoment.com`. It must be `https://`: it is the OAuth
      redirect base and the source of the Secure-cookie decision.
    - `QUICKREEL_CORS_ORIGINS` - the same origin.
-   - At least one AI provider: `QUICKREEL_GEMINI_API_KEY`, or
+   - At least one AI provider. The simplest is a single
+     `QUICKREEL_NVIDIA_API_KEY`: one NVIDIA NIM key covers transcription,
+     vision and moment selection, and needs no model weights in the image.
+     Alternatively set `QUICKREEL_GEMINI_API_KEY`, or
      `QUICKREEL_LLM_API_KEY` plus `QUICKREEL_LLM_BASE_URL` and
      `QUICKREEL_LLM_MODEL`.
 3. Attach the custom domain and let Render issue the certificate. The value in

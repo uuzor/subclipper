@@ -74,10 +74,19 @@ def get_transcription_provider() -> TranscriptionProvider:
     settings = get_settings()
     if settings.transcription_provider == "fake":
         return fakes.FakeTranscriptionProvider()
-    from .providers import FasterWhisperTranscriptionProvider
+    from .providers import FasterWhisperTranscriptionProvider, NvidiaTranscriptionProvider
 
     if settings.transcription_provider == "faster-whisper":
         return FasterWhisperTranscriptionProvider()
+    if settings.transcription_provider == "nvidia":
+        return NvidiaTranscriptionProvider()
+    # ``auto`` prefers hosted speech when a key is present: it needs no model
+    # weights, which is the difference between working and not working on a
+    # small container.
+    if settings.nvidia_api_key:
+        return _auto_with_runtime_fallback(
+            "transcription", NvidiaTranscriptionProvider, fakes.FakeTranscriptionProvider
+        )
     return _auto_with_runtime_fallback(
         "transcription", FasterWhisperTranscriptionProvider, fakes.FakeTranscriptionProvider
     )
@@ -87,10 +96,16 @@ def get_vision_provider() -> VisionProvider:
     settings = get_settings()
     if settings.vision_provider == "fake":
         return fakes.FakeVisionProvider()
-    from .providers import GeminiVisionProvider
+    from .providers import GeminiVisionProvider, NvidiaVisionProvider
 
     if settings.vision_provider == "gemini":
         return GeminiVisionProvider()
+    if settings.vision_provider == "nvidia":
+        return NvidiaVisionProvider()
+    if settings.nvidia_api_key:
+        return _auto_with_runtime_fallback(
+            "vision", NvidiaVisionProvider, fakes.FakeVisionProvider
+        )
     return _auto_with_runtime_fallback("vision", GeminiVisionProvider, fakes.FakeVisionProvider)
 
 
@@ -98,10 +113,16 @@ def get_moment_provider() -> MomentProvider:
     settings = get_settings()
     if settings.moment_provider == "fake":
         return fakes.FakeMomentProvider()
-    from .providers import LLMMomentProvider
+    from .providers import LLMMomentProvider, NvidiaMomentProvider
 
     if settings.moment_provider == "llm":
         return LLMMomentProvider()
+    if settings.moment_provider == "nvidia":
+        return NvidiaMomentProvider()
+    if settings.nvidia_api_key:
+        return _auto_with_runtime_fallback(
+            "moment", NvidiaMomentProvider, fakes.FakeMomentProvider
+        )
     return _auto_with_runtime_fallback("moment", LLMMomentProvider, fakes.FakeMomentProvider)
 
 

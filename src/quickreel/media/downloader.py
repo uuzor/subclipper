@@ -148,7 +148,10 @@ class YtDlpDownloader:
                 info = ydl.extract_info(url, download=True)
                 prepared = Path(ydl.prepare_filename(info))
         except Exception as exc:  # noqa: BLE001 - yt-dlp raises many types
-            raise DownloadError(_clean_message(exc)) from exc
+            message = _clean_message(exc)
+            if _is_bot_check(message):
+                raise DownloadError(f"{_COOKIE_HINT} (yt-dlp said: {message})") from exc
+            raise DownloadError(message) from exc
 
         path = _resolve_output(destination_dir, stem, prepared)
         if path is None:
@@ -239,6 +242,30 @@ def _clean_message(exc: Exception) -> str:
     if message.upper().startswith("ERROR:"):
         message = message[len("ERROR:") :].strip()
     return message or "download failed"
+
+
+# Phrases YouTube uses when it refuses a datacenter IP rather than the request.
+# Metadata extraction still succeeds in this case, so the failure only appears
+# once the media is fetched.
+_BOT_CHECK_MARKERS = (
+    "sign in to confirm you",
+    "not a bot",
+    "confirm your age",
+    "http error 403",
+    "forbidden",
+)
+_COOKIE_HINT = (
+    "YouTube refuses media downloads from datacenter IPs with a bot check. "
+    "Metadata is readable, so the video is valid - only the media request is "
+    "blocked. Upload the file, or set QUICKREEL_DOWNLOADER_COOKIES_FILE to a "
+    "cookies.txt exported from a signed-in browser, or QUICKREEL_DOWNLOADER_PROXY "
+    "to a residential proxy."
+)
+
+
+def _is_bot_check(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in _BOT_CHECK_MARKERS)
 
 
 _downloader: VideoDownloader | None = None

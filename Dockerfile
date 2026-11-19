@@ -26,12 +26,15 @@ COPY src/ ./src/
 # pluggable, so the default image stays lean and a deployment that wants local
 # Whisper builds with --build-arg INSTALL_AI=1.
 ARG INSTALL_AI=0
+# URL ingestion needs yt-dlp in every image: without it the downloader falls
+# back to a stub that fails every link import with "yt-dlp is not installed on
+# this server". It is a small pure-Python package, unlike the `ai` extra.
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip \
     && if [ "$INSTALL_AI" = "1" ]; then \
-         /opt/venv/bin/pip install ".[ai]"; \
+         /opt/venv/bin/pip install ".[ai,download]"; \
        else \
-         /opt/venv/bin/pip install .; \
+         /opt/venv/bin/pip install ".[download]"; \
        fi
 
 # ---- Runtime ----

@@ -8,8 +8,10 @@ is only required when a provider is actually selected. Providers raise a clear
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
+import math
 from pathlib import Path
 
 from ..config import get_settings
@@ -160,6 +162,258 @@ class GeminiVisionProvider:
         return {"mime_type": mime, "data": path.read_bytes()}
 
 
+class _NvidiaClient:
+    """Shared OpenAI-compatible client for the NVIDIA NIM hosted models.
+
+    Every NIM chat model answers on the same ``/chat/completions`` shape, so one
+    small client serves speech, vision and reasoning. Two quirks matter:
+
+    * Reasoning models spend completion tokens on ``reasoning_content`` before
+      emitting ``content``. A small ``max_tokens`` therefore returns an empty
+      string with ``finish_reason: stop``, which looks like a model failure.
+      Every call here budgets for that and retries once with more room.
+    * ``temperature=0`` is not accepted by all of them, so it is omitted.
+    """
+
+    def __init__(self, *, api_key: str, base_url: str, timeout: int, transport=None) -> None:
+        if not api_key:
+            raise ProviderUnavailable("QUICKREEL_NVIDIA_API_KEY is not set.")
+        self._api_key = api_key
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout
+        self._transport = transport
+
+    def chat(self, *, model: str, messages: list, max_tokens: int = 4096) -> str:
+        import httpx
+
+        # Reasoning models can burn the whole budget before writing an answer, so
+        # a single retry with double the room turns an empty response into a
+        # usable one without failing the stage.
+        for attempt, budget in enumerate((max_tokens, max_tokens * 3), start=1):
+            try:
+                with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
+                    response = client.post(
+                        f"{self._base_url}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {self._api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={"model": model, "messages": messages, "max_tokens": budget},
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                choice = payload["choices"][0]
+                content = (choice["message"].get("content") or "").strip()
+                if content:
+                    return content
+                logger.warning(
+                    "nvidia.empty_content",
+                    model=model,
+                    attempt=attempt,
+                    finish_reason=choice.get("finish_reason"),
+                    reasoning_tokens=(
+                        (payload.get("usage") or {})
+                        .get("completion_tokens_details", {})
+                        .get("reasoning_tokens")
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 - httpx and KeyError alike
+                logger.warning(
+                    "nvidia.request_failed", model=model, attempt=attempt, error=str(exc)
+                )
+                if attempt == 2:
+                    raise ProviderUnavailable(f"NVIDIA request failed: {exc}") from exc
+        raise ProviderUnavailable(
+            f"NVIDIA model {model} returned no content; it spent the token budget on reasoning"
+        )
+
+
+class NvidiaTranscriptionProvider:
+    """Speech recognition through a hosted omni model.
+
+    The production image carries no Whisper weights, so this is what makes
+    transcription possible on a small container. Audio is cut into bounded
+    chunks and each chunk is transcribed separately, which keeps every upload
+    small and lets timestamps be offset back onto the source timeline.
+    """
+
+    name = "nvidia-omni"
+
+    _PROMPT = (
+        "Transcribe this audio verbatim, including filler words and false starts. "
+        "Return strict JSON only: "
+        '{"language": str, "segments": [{"start": float, "end": float, "text": str}]}. '
+        "Times are seconds from the start of this audio. Do not translate."
+    )
+
+    def __init__(self, *, client: _NvidiaClient | None = None) -> None:
+        settings = get_settings()
+        self._settings = settings
+        self._client = client or _NvidiaClient(
+            api_key=settings.nvidia_api_key,
+            base_url=settings.nvidia_base_url,
+            timeout=settings.nvidia_timeout_seconds,
+        )
+
+    def transcribe(self, audio_path: Path) -> TranscriptResult:
+        settings = self._settings
+        audio_path = Path(audio_path)
+        total_seconds = ffmpeg.probe(audio_path).duration_seconds or 0.0
+        chunk = max(settings.nvidia_asr_chunk_seconds, 10.0)
+        if total_seconds <= 0:
+            offsets = [0.0]
+        else:
+            # ceil, not floor+1: a 20s source cut into 10s chunks is two chunks,
+            # and the extra one would be an empty slice past the end.
+            count = math.ceil(total_seconds / chunk)
+            # Encoders pad the container, so a 20s file can probe as 20.1s. A
+            # sliver tail is not worth a whole extra request.
+            if count > 1 and total_seconds - (count - 1) * chunk < 1.0:
+                count -= 1
+            count = min(count, max(settings.nvidia_asr_max_chunks, 1))
+            offsets = [index * chunk for index in range(max(count, 1))]
+
+        segments: list[TranscriptSegment] = []
+        language = "en"
+        for offset in offsets:
+            piece = ffmpeg.slice_audio(
+                audio_path,
+                settings.artifacts_dir / f"{audio_path.stem}_asr_{int(offset)}.wav",
+                start=offset,
+                duration=chunk,
+            )
+            payload = _extract_json(self._transcribe_chunk(piece))
+            language = payload.get("language") or language
+            for item in payload.get("segments", []):
+                if not isinstance(item, dict) or "text" not in item:
+                    continue
+                text = str(item["text"]).strip()
+                if not text:
+                    continue
+                start = float(item.get("start", 0.0)) + offset
+                end = float(item.get("end", start)) + offset
+                segments.append(
+                    TranscriptSegment(
+                        start=start,
+                        end=max(end, start),
+                        text=text,
+                        words=[],
+                    )
+                )
+        if not segments:
+            raise ProviderUnavailable("NVIDIA transcription returned no segments")
+        segments.sort(key=lambda segment: segment.start)
+        return TranscriptResult(
+            language=str(language),
+            text=" ".join(segment.text for segment in segments).strip(),
+            segments=segments,
+            provider=self.name,
+        )
+
+    def _transcribe_chunk(self, path: Path) -> str:
+        import base64
+
+        encoded = base64.b64encode(path.read_bytes()).decode()
+        return self._client.chat(
+            model=self._settings.nvidia_asr_model,
+            max_tokens=8192,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": self._PROMPT},
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"data": encoded, "format": "wav"},
+                        },
+                    ],
+                }
+            ],
+        )
+
+
+class NvidiaVisionProvider:
+    """Visual understanding: sampled frames plus the transcript summary."""
+
+    name = "nvidia-vl"
+
+    _PROMPT = (
+        "You are analysing a long-form video for short-form clip potential. "
+        "The images are frames sampled in time order, roughly every {interval:.0f} "
+        "seconds starting at 0. Return strict JSON only: "
+        '{{"summary": str, "scenes": [{{"time": float}}], '
+        '"highlights": [{{"time": float, "note": str}}]}}. '
+        "Scenes are hard visual cuts; highlights are visually notable moments. "
+        "Times are seconds from the start of the video."
+    )
+
+    def __init__(self, *, client: _NvidiaClient | None = None) -> None:
+        settings = get_settings()
+        self._settings = settings
+        self._client = client or _NvidiaClient(
+            api_key=settings.nvidia_api_key,
+            base_url=settings.nvidia_base_url,
+            timeout=settings.vision_timeout_seconds,
+        )
+
+    def analyze(self, video_path: Path, transcript: TranscriptResult) -> VisualAnalysis:
+        settings = self._settings
+        frames_dir = settings.artifacts_dir / f"{Path(video_path).stem}_frames"
+        frames = ffmpeg.extract_frames(
+            video_path,
+            frames_dir,
+            interval_seconds=settings.vision_frame_interval_seconds,
+            max_frames=settings.vision_max_frames,
+        )
+        prompt = self._PROMPT.format(interval=settings.vision_frame_interval_seconds)
+        content: list = [{"type": "text", "text": prompt}]
+        if transcript.text:
+            content.append({"type": "text", "text": f"Transcript:\n{transcript.text[:8000]}"})
+        for frame in frames:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": _data_url(frame)},
+                }
+            )
+        payload = _extract_json(
+            self._client.chat(
+                model=settings.nvidia_vision_model,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": content}],
+            )
+        )
+        scenes = [
+            SceneBoundary(time=float(item["time"]))
+            for item in payload.get("scenes", [])
+            if isinstance(item, dict) and "time" in item
+        ]
+        if not scenes:
+            # A model that returns no cuts should not leave the pipeline without
+            # visual structure; ffmpeg's own detector is the backstop.
+            scenes = [
+                SceneBoundary(time=time)
+                for time in ffmpeg.detect_scenes(
+                    video_path, threshold=settings.vision_scene_threshold
+                )
+            ]
+        return VisualAnalysis(
+            scenes=scenes,
+            summary=str(payload.get("summary") or ""),
+            highlights=payload.get("highlights", []) or [],
+            provider=self.name,
+        )
+
+
+def _data_url(path: Path) -> str:
+    """Inline an image as a data URL, the form the NIM vision models accept."""
+    import base64
+
+    mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+    encoded = base64.b64encode(path.read_bytes()).decode()
+    return f"data:{mime};base64,{encoded}"
+
+
 class LLMMomentProvider:
     """Reasoning stage: asks a chat model to nominate candidate moments."""
 
@@ -188,8 +442,9 @@ class LLMMomentProvider:
         visual: VisualAnalysis,
         audio_events: list[AudioEvent],
     ) -> MomentDetectionResult:
-        settings = get_settings()
-        import httpx
+        # Instance settings, not get_settings(): a subclass may be configured
+        # with a different model or chunking and must not read the global cache.
+        settings = getattr(self, "_settings", None) or get_settings()
 
         events = ", ".join(
             f"{event.kind}@{event.start:.1f}-{event.end:.1f}" for event in audio_events
@@ -202,9 +457,7 @@ class LLMMomentProvider:
             overlap_seconds=settings.llm_chunk_overlap_seconds,
         )
         logger.info("moment.llm_windows", windows=len(windows))
-        with httpx.Client(
-            timeout=settings.llm_timeout_seconds, transport=self._transport
-        ) as client:
+        with self._client_context(settings) as client:
             for window_text in windows:
                 payload = self._detect_window(
                     client,
@@ -232,6 +485,20 @@ class LLMMomentProvider:
                         )
                     )
         return MomentDetectionResult(moments=moments, provider=self.name)
+
+    @contextlib.contextmanager
+    def _client_context(self, settings):
+        """Yield the HTTP client used for each window.
+
+        Overridden by subclasses that bring their own transport, so ``detect``
+        stays shared and only the per-window call differs.
+        """
+        import httpx
+
+        with httpx.Client(
+            timeout=settings.llm_timeout_seconds, transport=self._transport
+        ) as client:
+            yield client
 
     def _detect_window(
         self,
@@ -279,6 +546,54 @@ class LLMMomentProvider:
                     error=str(exc),
                 )
         raise ProviderUnavailable(f"moment detection failed after retries: {last_error}")
+
+
+class NvidiaMomentProvider(LLMMomentProvider):
+    """Moment selection on the NVIDIA endpoint.
+
+    The prompt, windowing and de-duplication are identical to the generic
+    OpenAI-compatible provider; only the transport differs, so this reuses that
+    logic rather than duplicating it.
+    """
+
+    name = "nvidia-moments"
+
+    def __init__(self, *, client: _NvidiaClient | None = None) -> None:
+        settings = get_settings()
+        self._settings = settings
+        self._client = client or _NvidiaClient(
+            api_key=settings.nvidia_api_key,
+            base_url=settings.nvidia_base_url,
+            timeout=settings.llm_timeout_seconds,
+        )
+
+    @contextlib.contextmanager
+    def _client_context(self, settings):
+        # The NIM client is per-instance, so there is no per-call client to open.
+        yield None
+
+    def _detect_window(
+        self,
+        client,
+        window_text: str,
+        visual_summary: str,
+        events: str,
+        settings,
+    ) -> dict:
+        user = (
+            f"Visual summary: {visual_summary}\n"
+            f"Audio events: {events}\n\n"
+            f"Transcript:\n{window_text}"
+        )
+        content = self._client.chat(
+            model=self._settings.nvidia_moment_model,
+            max_tokens=8192,
+            messages=[
+                {"role": "system", "content": self._SYSTEM},
+                {"role": "user", "content": user},
+            ],
+        )
+        return _extract_json(content)
 
 
 class LibrosaAudioAnalyzer:

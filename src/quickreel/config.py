@@ -56,6 +56,21 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_model: str = "gemini-flash-lite-latest"
 
+    # NVIDIA NIM (build.nvidia.com). One OpenAI-compatible endpoint covers all
+    # three AI stages, so a deployment can run without a local Whisper model.
+    # The omni model takes audio directly, the VL model takes sampled frames,
+    # and a text model does moment selection.
+    nvidia_api_key: str = ""
+    nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
+    nvidia_asr_model: str = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+    nvidia_vision_model: str = "nvidia/nemotron-3.5-super-vl-120b-a12b"
+    nvidia_moment_model: str = "moonshotai/kimi-k3.1-pro"
+    nvidia_timeout_seconds: int = 180
+    # Audio is uploaded in chunks so a 2-hour source does not become one
+    # multi-hundred-megabyte request. Chunk length bounds each upload.
+    nvidia_asr_chunk_seconds: float = 120.0
+    nvidia_asr_max_chunks: int = 240
+
     # OpenAI-compatible LLM
     llm_base_url: str = ""
     llm_api_key: str = ""

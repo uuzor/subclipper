@@ -148,6 +148,46 @@ def extract_audio(source: str | Path, target: str | Path, sample_rate: int = 160
     return target
 
 
+def slice_audio(
+    source: str | Path,
+    target: str | Path,
+    *,
+    start: float,
+    duration: float,
+    sample_rate: int = 16000,
+) -> Path:
+    """Cut a mono WAV window out of ``source``.
+
+    Used to feed a hosted speech model in bounded pieces: a two-hour source is
+    hundreds of megabytes of PCM, which is too much for a single upload.
+    """
+    settings = get_settings()
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _run(
+        [
+            settings.ffmpeg_bin,
+            "-y",
+            "-ss",
+            f"{start:.3f}",
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            str(source),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "-acodec",
+            "pcm_s16le",
+            str(target),
+        ],
+        timeout=settings.render_timeout_seconds,
+    )
+    return target
+
+
 def detect_silences(
     source: str | Path,
     noise_db: float = -32.0,
