@@ -11,6 +11,8 @@ module and the validation step in :mod:`quickreel.media.url_source`.
 
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -76,14 +78,37 @@ class YtDlpDownloader:
         max_height: int = 1080,
         timeout_seconds: int = 1800,
         cookies_file: str = "",
+        cookies_text: str = "",
         proxy: str = "",
         max_bytes: int = 0,
     ) -> None:
         self.max_height = max_height
         self.timeout_seconds = timeout_seconds
         self.cookies_file = cookies_file
+        self.cookies_text = cookies_text
         self.proxy = proxy
         self.max_bytes = max_bytes
+        self._temp_cookies: Path | None = None
+
+    def _cookie_path(self) -> str:
+        """Path to the cookies yt-dlp should use.
+
+        ``cookies_text`` exists because a managed platform gives you environment
+        variables, not a writable path you can mount a secret into. The value is
+        written to an owner-only temp file so the cookie jar is never on a
+        shared, world-readable path.
+        """
+        if self.cookies_file:
+            return self.cookies_file
+        if not self.cookies_text:
+            return ""
+        if self._temp_cookies is None or not self._temp_cookies.exists():
+            handle, name = tempfile.mkstemp(prefix="quickreel-cookies-", suffix=".txt")
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                stream.write(self.cookies_text)
+            os.chmod(name, 0o600)
+            self._temp_cookies = Path(name)
+        return str(self._temp_cookies)
 
     def _base_options(self) -> dict:
         options: dict = {
@@ -95,8 +120,9 @@ class YtDlpDownloader:
             "fragment_retries": 3,
             "noplaylist": True,  # a playlist URL must not turn into 200 downloads
         }
-        if self.cookies_file:
-            options["cookiefile"] = self.cookies_file
+        cookie_path = self._cookie_path()
+        if cookie_path:
+            options["cookiefile"] = cookie_path
         if self.proxy:
             options["proxy"] = self.proxy
         return options
@@ -257,9 +283,10 @@ _BOT_CHECK_MARKERS = (
 _COOKIE_HINT = (
     "YouTube refuses media downloads from datacenter IPs with a bot check. "
     "Metadata is readable, so the video is valid - only the media request is "
-    "blocked. Upload the file, or set QUICKREEL_DOWNLOADER_COOKIES_FILE to a "
-    "cookies.txt exported from a signed-in browser, or QUICKREEL_DOWNLOADER_PROXY "
-    "to a residential proxy."
+    "blocked. Upload the file, or set QUICKREEL_DOWNLOADER_COOKIES_TEXT to the "
+    "contents of a cookies.txt exported from a signed-in browser "
+    "(QUICKREEL_DOWNLOADER_COOKIES_FILE also works when you can mount a file), "
+    "or QUICKREEL_DOWNLOADER_PROXY to a residential proxy."
 )
 
 
@@ -295,6 +322,7 @@ def get_downloader() -> VideoDownloader:
         max_height=settings.download_max_height,
         timeout_seconds=settings.download_timeout_seconds,
         cookies_file=settings.downloader_cookies_file,
+        cookies_text=settings.downloader_cookies_text,
         proxy=settings.downloader_proxy,
         max_bytes=settings.max_upload_bytes,
     )

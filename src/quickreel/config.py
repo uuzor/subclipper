@@ -112,6 +112,9 @@ class Settings(BaseSettings):
     download_timeout_seconds: int = 1800
     # Netscape-format cookies file, for sites that require a logged-in session.
     downloader_cookies_file: str = ""
+    # The same jar as text, for hosts where you can only set env vars. Written
+    # to an owner-only temp file when a download runs.
+    downloader_cookies_text: str = ""
     downloader_proxy: str = ""
 
     # Publishing / scheduling. ``mock`` resolves every platform to the

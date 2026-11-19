@@ -203,3 +203,39 @@ def test_fake_downloader_raises_when_configured(tmp_path: Path):
     downloader = FakeDownloader(error="boom")
     with pytest.raises(DownloadError, match="boom"):
         downloader.download("https://example.com/v", tmp_path, "stem")
+
+
+def test_cookies_text_is_written_to_an_owner_only_temp_file(tmp_path):
+    """A managed host can only give us env vars, not a mounted file.
+
+    The jar holds a signed-in session, so it must not land on a world-readable
+    path: mkstemp gives 0600, and that is the property worth asserting.
+    """
+    import os
+    import stat
+
+    jar = "# Netscape HTTP Cookie File\n.x\tTRUE\t/\tTRUE\t0\ta\tb\n"
+    downloader = YtDlpDownloader(cookies_text=jar)
+    path = downloader._cookie_path()
+
+    assert path and Path(path).exists()
+    assert Path(path).read_text().startswith("# Netscape HTTP Cookie File")
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    assert downloader._base_options()["cookiefile"] == path
+
+
+def test_cookies_file_takes_precedence_over_text(tmp_path):
+    jar = tmp_path / "cookies.txt"
+    jar.write_text("# Netscape HTTP Cookie File\n")
+    downloader = YtDlpDownloader(cookies_file=str(jar), cookies_text="ignored")
+    assert downloader._cookie_path() == str(jar)
+
+
+def test_no_cookies_means_no_cookiefile_option():
+    assert "cookiefile" not in YtDlpDownloader()._base_options()
+
+
+def test_cookie_temp_file_is_reused_across_downloads():
+    """Re-parsing the jar per download is waste; one file per downloader is enough."""
+    downloader = YtDlpDownloader(cookies_text="# Netscape HTTP Cookie File\n")
+    assert downloader._cookie_path() == downloader._cookie_path()
