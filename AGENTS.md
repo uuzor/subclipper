@@ -567,3 +567,20 @@ through `google-api-core`, so it disappears the day `google-generativeai` is
 replaced - which is planned, since that package is deprecated. Importing it
 inside a provider would then fail at the first request, after the upload has
 already succeeded.
+
+## Pushing does not deploy
+
+The Koyeb service reports `no_deploy_on_push: false`, but no GitHub webhook is
+installed, so a push changes nothing in production. After pushing, trigger the
+build explicitly and pin the commit:
+
+```
+curl -X POST "https://app.koyeb.com/v1/services/<service-id>/redeploy" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"deployment\":{\"git\":{\"sha\":\"$(git rev-parse HEAD)\"}}}"
+```
+
+Without the explicit `sha` the deployment definition stores an empty sha and
+silently tracks the branch, which makes it impossible to tell which commit is
+live. Confirm with the frontend asset hash on `/` matching the local
+`frontend/dist/assets/index-*.js` from `npm run build`.
