@@ -438,3 +438,27 @@ Trend detection is a signal about what to make, not source footage to re-post.
 The trend feature targets a creator's own back catalogue, matched against
 official API signals; every project records `license_note` and `authorized_by`.
 See the README section "Trends: repurpose, do not re-upload".
+
+## Deployment: Render, and the two traps it exposed
+
+The app ships as one container (`Dockerfile`, `render.yaml`, `docs/deployment.md`)
+running uvicorn with eager Celery tasks. Two failures only appeared on a real
+deploy, and both are easy to reintroduce.
+
+**Optional-dependency fallbacks must fail in the constructor.** The registry
+chooses between a real provider and its fake by catching `ProviderUnavailable`
+from the constructor. `LibrosaAudioAnalyzer` originally imported librosa inside
+`analyze()`, so the constructor always succeeded, the fallback never ran, and
+every project failed at the audio stage on an image built without the `ai`
+extra. Probe with `importlib.util.find_spec` in `__init__`.
+
+**Cap encoder threads.** x264 sizes its frame pools from the detected core
+count, and a container inherits the host's count rather than its own memory
+limit. On a 512MB instance 16 threads is OOM-killed mid-render; because eager
+mode encodes inside the web process, that takes the entire service down and
+every request returns 502 until it restarts. `QUICKREEL_RENDER_THREADS`
+(default `2`) caps both the encoder and the filter graph.
+
+Related: `/healthz` is the liveness route and `/readyz` names the provider
+behind each stage. The SPA catch-all answers unknown paths with HTML, so a
+health check pointed at `/health` passes on static files alone.
