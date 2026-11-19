@@ -90,6 +90,22 @@ Always run `make lint` and `make test` before finishing a change. Both must pass
   falls back to its fake via `_FallbackProxy`, logged as
   `provider.runtime_fallback`. Explicit provider names (`faster-whisper`,
   `gemini`, `llm`) never fall back; they surface the error.
+- The hosted deploy sits behind Cloudflare, which rejects any request body over
+  100MiB with a bare HTML `413` that never reaches FastAPI. The app's own
+  `max_upload_mb` (2048) is therefore not the effective limit. Anything that
+  uploads media must use the chunked endpoints (`/upload/init`, `/chunk`,
+  `/complete`); the frontend switches automatically above 64MiB. Verified on the
+  live deploy: 99MiB single-shot returns 200, 101MiB returns the Cloudflare 413,
+  and a 516MB chunked upload completes byte-exact.
+- Audio analysis (`SignalAudioAnalyzer`) reads ffmpeg `astats` and needs no
+  librosa/numpy. It reports emphasis and silence only. Do not add a laughter
+  detector gated on astats' `Crest_factor` or `Flat_factor`: crest is reported on
+  a scale spanning six orders of magnitude between files and flat factor is
+  constant, so any threshold passes every frame (a zero-crossing gate matched
+  13% of plain speech). Real laughter detection needs a trained classifier.
+- astats emits `-inf` for digital silence. `audio_envelope` floors it to
+  `-120` dBFS because callers take percentiles and means, which an infinity
+  silently skews.
 
 ## Verifying the real AI path
 
