@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
-import type { Clip, ProjectDetail } from "../lib/types";
+import type { Clip, ExportPlatform, ExportPlatformKey, ProjectDetail } from "../lib/types";
 import { Timeline } from "../components/Timeline";
 import { ScoreBreakdown } from "../components/ScoreBreakdown";
 import { SchedulePanel } from "../components/SchedulePanel";
@@ -24,6 +24,8 @@ export default function Project() {
   const [rendering, setRendering] = useState(false);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [activeClipId, setActiveClipId] = useState<string | undefined>();
+  const [platforms, setPlatforms] = useState<ExportPlatform[]>([]);
+  const [platform, setPlatform] = useState<ExportPlatformKey>("tiktok");
   const timer = useRef<number | null>(null);
 
   const load = useCallback(async () => {
@@ -63,11 +65,31 @@ export default function Project() {
     }
   }, [project, activeClipId]);
 
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .exportPlatforms()
+      .then((list) => {
+        if (!cancelled && list.length) {
+          setPlatforms(list);
+          setPlatform((current) =>
+            list.some((p) => p.key === current) ? current : list[0]!.key,
+          );
+        }
+      })
+      .catch(() => {
+        // The picker falls back to the default target; rendering still works.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   async function onRender() {
     setRendering(true);
     setRenderError(null);
     try {
-      const clips = await api.render(projectId, { max_clips: 5 });
+      const clips = await api.render(projectId, { max_clips: 5, platform });
       setProject((p) => (p ? { ...p, clips } : p));
       setActiveClipId((id) => id ?? clips[0]?.id);
     } catch (err) {
@@ -205,6 +227,24 @@ export default function Project() {
             </h2>
             <div className="clips-actions">
               {renderError && <span className="clips-err">{renderError}</span>}
+              {platforms.length > 1 && (
+                <label className="clips-platform">
+                  <span>Format</span>
+                  <select
+                    value={platform}
+                    onChange={(e) =>
+                      setPlatform(e.target.value as ExportPlatformKey)
+                    }
+                    disabled={rendering}
+                  >
+                    {platforms.map((p) => (
+                      <option key={p.key} value={p.key}>
+                        {p.label} · {p.aspect}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <button
                 className="btn btn-primary"
                 onClick={onRender}
@@ -216,7 +256,7 @@ export default function Project() {
                   </>
                 ) : (
                   <>
-                    {hasRendered ? "Re-render clips" : "Render 9:16 clips"}
+                    {hasRendered ? "Re-render clips" : "Render clips"}
                     <IconArrow size={17} />
                   </>
                 )}
