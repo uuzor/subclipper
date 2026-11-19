@@ -146,6 +146,11 @@ class FakeMomentProvider:
     ) -> MomentDetectionResult:
         segments = transcript.segments
         moments: list[CandidateMoment] = []
+        if not segments:
+            # Silence, music, or a failed transcription: there is nothing to
+            # quote. Returning no moments lets the pipeline finish with an empty
+            # clip set instead of raising IndexError on segments[0].
+            return MomentDetectionResult(moments=moments, provider=self.name)
         # Slide a window of two adjacent segments so moments carry setup + payoff.
         for index in range(len(segments)):
             window = segments[index : index + 2]

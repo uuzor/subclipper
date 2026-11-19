@@ -176,6 +176,11 @@ class Settings(BaseSettings):
         }
     )
 
+    # Recalibration. A fit needs enough observed clips to beat noise, and a
+    # workspace that has not opted in keeps the configured weights.
+    scoring_calibration_enabled: bool = True
+    scoring_calibration_min_samples: int = 12
+
     @field_validator("data_dir")
     @classmethod
     def _resolve_data_dir(cls, value: Path) -> Path:
@@ -191,6 +196,23 @@ class Settings(BaseSettings):
         if text and text not in {"mock", "live"}:
             raise ValueError(f"publishing_mode must be 'mock' or 'live', got {value!r}")
         return text
+
+    @field_validator("database_url", mode="after")
+    @classmethod
+    def _pin_the_installed_postgres_driver(cls, value: str) -> str:
+        """Force the Postgres driver that is actually installed.
+
+        Hosting providers hand out ``postgres://`` (Render, Heroku) or plain
+        ``postgresql://``. SQLAlchemy resolves both to psycopg2, which this
+        project does not depend on, so an unmodified provider URL fails at the
+        first connection with a missing-module error. psycopg 3 is the declared
+        dependency, so pin it here rather than asking operators to rewrite the
+        string by hand.
+        """
+        for prefix in ("postgres://", "postgresql://"):
+            if value.startswith(prefix):
+                return "postgresql+psycopg://" + value[len(prefix) :]
+        return value
 
     @field_validator("frontend_dir", mode="before")
     @classmethod

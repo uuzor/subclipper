@@ -27,7 +27,7 @@ mockup: the pipeline runs end to end and produces real 1080x1920 MP4 files.
 | Publishing to platforms | Mock adapters only | `publishing/` |
 | Channel ingestion trigger (WebSub) | Done (mock hub fallback) | `triggers/` |
 | Performance feedback loop (sample collection) | Done (mock adapters) | `publishing/metrics.py` |
-| Viral Intelligence weight recalibration | Not yet (data is being recorded) | `analysis/scoring.py` |
+| Viral Intelligence weight recalibration | Done (propose + explicit apply) | `analysis/calibration.py` |
 
 ## Architecture
 
@@ -92,6 +92,24 @@ make deploy PUBLIC_BASE_URL=https://my-app.example.com PORT=12000
 The app builds no links from the request host, so this is the only thing that
 has to be right for a forwarded deployment. Both targets bind `0.0.0.0`, so the
 port forward reaches them.
+
+### Deploying to Render
+
+`Dockerfile` and `render.yaml` describe the deployment: one container serving
+the API and the built SPA, PostgreSQL for state, and a persistent disk for
+uploads and renders. Point Render at this repository and pick **Blueprint**.
+
+```bash
+# Verify a running deployment
+curl -fsS https://<host>/health
+curl -fsS -o /dev/null -w '%{http_code}\n' https://<host>/workbench   # SPA deep link
+```
+
+Production mode (`QUICKREEL_ENV=production`) refuses to start on an unsafe
+configuration — mock publishing, a missing OAuth state secret, or a non-HTTPS
+public origin — so a misconfiguration is a boot failure rather than a publish
+that silently reaches nobody. See [docs/deployment.md](docs/deployment.md) for
+the required values and how to scale the worker out.
 
 ## Using the API
 
@@ -328,7 +346,7 @@ foundation (scheduler, adapter interface, mocks).
 4. ~~Vertical video conversion and captions~~
 5. ~~Viral scoring and clip ranking~~
 6. Face tracking and advanced editing (MediaPipe, per-frame crop offsets)
-7. Performance analytics and the Viral Intelligence learning loop
+7. ~~Performance analytics and the Viral Intelligence learning loop~~ (recording and recalibration)
 
 Distribution work, in build order:
 
@@ -337,6 +355,7 @@ Distribution work, in build order:
 - ~~YouTube upload-event trigger (WebSub; needs no app audit)~~ (done)
 - TikTok and YouTube Shorts adapters, then Meta once app review clears
 - ~~Performance feedback loop~~ (done — samples recorded from first publish)
+- ~~Viral Intelligence weight recalibration~~ (done — fits are proposed, applied explicitly)
 - Trend-to-back-catalogue matching
 
 ## Publishing and scheduling
@@ -439,11 +458,54 @@ sample per platform rather than the sum across samples, because platform
 counters are cumulative — summing the series would count the same view once per
 sweep.
 
-What is *not* built yet is the recalibration step: the weights in
-`analysis/scoring.py` are still the brief's initial assumptions. The samples are
-being collected now so that when recalibration lands there is history to fit,
-rather than a cold start. `QUICKREEL_METRICS_ENABLED=false` turns sampling off
-for a deployment that must not make outbound calls.
+Sampling is what feeds recalibration, described next.
+`QUICKREEL_METRICS_ENABLED=false` turns it off for a deployment that must not
+make outbound calls.
+
+## Viral Intelligence: recalibrating the weights
+
+The samples above are only worth recording if something reads them. The scoring
+weights started as the brief's design assumptions; recalibration replaces them
+with weights fitted to what this workspace's clips actually did.
+
+```bash
+# Fit a proposal from recorded engagement (does not change scoring)
+curl -X POST localhost:12000/api/v1/scoring/calibration
+
+# Review proposals, and the weights currently in force
+curl localhost:12000/api/v1/scoring/calibration
+curl localhost:12000/api/v1/scoring/weights
+
+# Install one
+curl -X POST localhost:12000/api/v1/scoring/calibration/{id}/apply
+```
+
+Proposing and applying are separate calls on purpose. A loop that silently
+rewrote the model it is judged by would have no ground truth left to check it
+against, so a fit only ever produces a reviewable record: the weights it would
+install, the sample it was fitted on, per-platform counts, and diagnostics
+including how much of the engagement variance the current weights explain versus
+the fitted ones.
+
+The fit itself makes four deliberate choices. Outcomes are ranked *within each
+platform* before fitting, because a view on TikTok and a view on Shorts are not
+the same unit and one big platform would otherwise dominate the target. The
+weights stay a distribution — sum to one with a floor under every factor — so a
+factor that looks useless is shrunk, not deleted, on the strength of a sample
+too small to justify deleting it. A ridge term pulls the fit toward the current
+weights and weakens as evidence accumulates, so early fits barely move. And a fit
+that cannot explain engagement better than the weights it would replace is
+recorded as not applicable and refused at apply time, which is the honest answer
+on thin or noisy data.
+
+Below `QUICKREEL_SCORING_CALIBRATION_MIN_SAMPLES` (default 12) observed clips the
+fit returns the prior untouched and says so. `QUICKREEL_SCORING_CALIBRATION_ENABLED=false`
+disables the whole path.
+
+An applied vector takes effect on the next analysis run: the pipeline loads the
+workspace's active weights when it builds its scorer, so a recalibration changes
+what gets clipped from then on. Clips already scored keep the score they were
+given, which is what makes the next fit comparable to the last.
 
 ## Trends: repurpose, do not re-upload
 

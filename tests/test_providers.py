@@ -56,6 +56,18 @@ def test_fake_moment_provider_classifies_types():
     assert "humor" in types
 
 
+def test_fake_moment_provider_tolerates_an_empty_transcript():
+    """Silent video is a normal input, not a crash.
+
+    A clip of music, applause, or a failed transcription yields no segments.
+    Indexing segments[0] for the fallback moment raised IndexError, which failed
+    the whole project at the analyze stage.
+    """
+    empty = TranscriptResult(language="en", text="", provider="unit", segments=[])
+    result = fakes.FakeMomentProvider().detect(empty, VisualAnalysis(), [])
+    assert result.moments == []
+
+
 def test_fallback_proxy_switches_to_fake_on_runtime_error():
     class Boom:
         name = "boom"

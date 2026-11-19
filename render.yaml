@@ -1,0 +1,79 @@
+# Render blueprint for QuickReel.
+#
+# Deploy with: Render Dashboard -> New -> Blueprint -> pick this repo.
+#
+# One web service and one database. The service is a single container on
+# purpose: uploads and renders live on a persistent disk, and a disk can only be
+# mounted by one service. Splitting the Celery worker out needs shared object
+# storage first, so that is the scale-up step, not the starting point.
+
+databases:
+  - name: quickreel-db
+    databaseName: quickreel
+    user: quickreel
+    # The free tier is deleted after 90 days: fine for a trial, wrong for a
+    # product that keeps its data.
+    plan: basic-256mb
+    postgresMajorVersion: "16"
+    ipAllowList: []
+
+services:
+  - type: web
+    name: quickreel
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: standard
+    region: oregon
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      # Production refuses to start on an unsafe configuration: mock publishing,
+      # a missing OAuth state secret, or a non-HTTPS origin all abort boot rather
+      # than fail later at the first publish.
+      - key: QUICKREEL_ENV
+        value: production
+      - key: QUICKREEL_DATABASE_URL
+        fromDatabase:
+          name: quickreel-db
+          property: connectionString
+      # Must be the verified public origin: it is the OAuth redirect base and
+      # decides whether session cookies are marked Secure.
+      - key: QUICKREEL_PUBLIC_BASE_URL
+        sync: false
+      - key: QUICKREEL_CORS_ORIGINS
+        sync: false
+      - key: QUICKREEL_OAUTH_STATE_SECRET
+        generateValue: true
+      - key: QUICKREEL_YOUTUBE_CALLBACK_SECRET
+        generateValue: true
+      # No live platform adapter ships yet, so a publish fails loudly instead of
+      # reporting a success that reached nobody. Mock is not available here:
+      # production rejects it at startup.
+      - key: QUICKREEL_PUBLISHING_MODE
+        value: live
+      # Fake output in production is worse than a visible failure, so a
+      # configured provider that breaks fails the project.
+      - key: QUICKREEL_ALLOW_PROVIDER_FALLBACK
+        value: "false"
+      # In-process execution: a long video blocks its own request, which is the
+      # honest trade for a single container.
+      - key: QUICKREEL_TASK_ALWAYS_EAGER
+        value: "true"
+      - key: QUICKREEL_DATA_DIR
+        value: /var/data
+      # AI providers. Without at least one, the pipeline degrades to the
+      # deterministic fakes and records that in the project's provider
+      # provenance, so a degraded run is visible rather than silent.
+      - key: QUICKREEL_GEMINI_API_KEY
+        sync: false
+      - key: QUICKREEL_LLM_API_KEY
+        sync: false
+      - key: QUICKREEL_LLM_BASE_URL
+        sync: false
+      - key: QUICKREEL_LLM_MODEL
+        sync: false
+    disk:
+      name: quickreel-data
+      mountPath: /var/data
+      sizeGB: 10

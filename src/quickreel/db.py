@@ -60,6 +60,21 @@ def init_db() -> None:
     _backfill_workspaces(engine)
 
 
+def _table_name_query(dialect_name: str) -> str:
+    """SQL that lists tables in the current schema for ``dialect_name``.
+
+    ``sqlite_master`` only exists on SQLite; asking Postgres for it raises
+    UndefinedTable and aborts startup, which is how a deployment that had only
+    ever run on SQLite fails the moment it meets a real database.
+    """
+    if dialect_name == "sqlite":
+        return "SELECT name FROM sqlite_master WHERE type='table'"
+    return (
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = current_schema()"
+    )
+
+
 def _backfill_workspaces(engine: Engine) -> None:
     """Give pre-tenancy rows a workspace.
 
@@ -78,16 +93,8 @@ def _backfill_workspaces(engine: Engine) -> None:
     scoped_tables = ("projects", "publish_targets", "channel_subscriptions")
     with engine.begin() as connection:
         tables = {
-            row[0]
-            for row in connection.execute(
-                text("SELECT name FROM sqlite_master WHERE type='table'")
-            ).all()
+            row[0] for row in connection.execute(text(_table_name_query(engine.dialect.name)))
         }
-        if not tables:
-            # Not SQLite. Use the inspector, which works on both backends.
-            from sqlalchemy import inspect
-
-            tables = set(inspect(engine).get_table_names())
 
         pending: dict[str, int] = {}
         for table in scoped_tables:

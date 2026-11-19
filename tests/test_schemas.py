@@ -98,3 +98,18 @@ def test_project_list_endpoint_survives_null_providers(auth_client):
     assert response.status_code == 200, response.text
     legacy = next(p for p in response.json() if p["id"] == project_id)
     assert legacy["providers"] == {}
+
+
+def test_the_table_probe_matches_the_dialect():
+    """A SQLite-only probe aborts startup on Postgres.
+
+    ``init_db`` lists tables to find rows predating tenancy. Asking a Postgres
+    database for ``sqlite_master`` raises UndefinedTable, so a build that only
+    ever ran on SQLite dies at boot the moment it is deployed against a real
+    database — which is exactly how the first Render deploy failed.
+    """
+    from quickreel.db import _table_name_query
+
+    assert "sqlite_master" in _table_name_query("sqlite")
+    assert "sqlite_master" not in _table_name_query("postgresql")
+    assert "information_schema.tables" in _table_name_query("postgresql")
