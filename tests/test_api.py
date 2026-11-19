@@ -181,3 +181,46 @@ def test_render_honours_vertical_flag(auth_client, sample_video):
     assert (horizontal["render_meta"]["width"], horizontal["render_meta"]["height"]) == (1920, 1080)
     h_info = ffmpeg.probe(horizontal["render_path"])
     assert (h_info.width, h_info.height) == (1920, 1080)
+
+
+def test_render_hands_off_to_a_thread_when_no_worker_exists(
+    auth_client, sample_video, settings
+):
+    """A render must not run inside the request when it can be avoided.
+
+    An edge proxy kills a long request at its own timeout and answers 502 while
+    ffmpeg keeps working, so the caller sees failure for a render that
+    succeeds. With no broker there is no worker, so the render runs in a thread
+    and the clip is polled instead. The test waits for the real thread to finish
+    rather than asserting a mock was called.
+    """
+    import time
+
+    project = _create_and_upload(auth_client, sample_video)
+    project_id = project["id"]
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+
+    settings.render_in_background = True
+    try:
+        response = auth_client.post(
+            f"/api/v1/projects/{project_id}/render", json={"max_clips": 1}
+        )
+    finally:
+        settings.render_in_background = False
+    assert response.status_code == 200, response.text
+    clip_id = response.json()[0]["id"]
+    # The response describes work that has been started, not work that is done.
+    assert response.json()[0]["status"] == "rendering"
+
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        clips = auth_client.get(f"/api/v1/projects/{project_id}/clips").json()
+        clip = next(c for c in clips if c["id"] == clip_id)
+        if clip["status"] in {"rendered", "render_failed"}:
+            break
+        time.sleep(0.5)
+
+    assert clip["status"] == "rendered", clip
+    download = auth_client.get(f"/api/v1/clips/{clip_id}/download")
+    assert download.status_code == 200
+    assert len(download.content) > 0

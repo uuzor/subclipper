@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,10 +10,12 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ...db import get_db
+from ...config import get_settings
+from ...db import get_db, session_scope
 from ...logging_setup import get_logger
-from ...models import Clip, Project, Workspace
-from ...rendering.renderer import render_clip
+from ...models import Clip, ClipStatus, Project, Workspace
+from ...pipeline.tasks import enqueue_render
+from ...rendering.renderer import render_clip, render_clip_by_id
 from ...schemas import ClipOut, RenderRequest
 from ..deps import current_workspace, get_scoped_project
 
@@ -80,6 +83,7 @@ def render_project_clips(
     workspace: Workspace = Depends(current_workspace),
 ) -> list[ClipOut]:
     get_scoped_project(db, project_id, workspace.id)
+    settings = get_settings()
 
     if payload.clip_ids:
         # Both filters: the ids come from the client, so the project scope is
@@ -103,6 +107,45 @@ def render_project_clips(
     if not clips:
         raise HTTPException(status_code=400, detail="no clips available to render")
 
+    if not settings.task_always_eager:
+        # A render outlives the edge proxy's request timeout on a real video, and
+        # the proxy answers 502 while ffmpeg keeps working - the caller sees a
+        # failure for work that actually succeeds. Hand it to the worker and let
+        # the client poll clip status, the same way processing works.
+        for clip in clips:
+            enqueue_render(
+                clip.id,
+                burn_captions=payload.burn_captions,
+                vertical=payload.vertical,
+            )
+            clip.status = ClipStatus.rendering
+        db.commit()
+        for clip in clips:
+            db.refresh(clip)
+        return [_clip_out(clip) for clip in clips]
+
+    if settings.render_in_background:
+        # No broker is configured, so there is no worker to hand the clip to and
+        # the render has to run in this process. A thread keeps it out of the
+        # request: the caller gets clip status immediately instead of a proxy
+        # timeout on work that would have succeeded. The thread opens its own
+        # session because a SQLAlchemy session is not thread-safe and the
+        # request's session closes when the response is sent.
+        clip_ids = [clip.id for clip in clips]
+        for clip in clips:
+            clip.status = ClipStatus.rendering
+        # Commit before dispatching: the thread renders in its own session, and a
+        # render that finishes first would otherwise be overwritten back to
+        # ``rendering`` by this session's later commit.
+        db.commit()
+        for clip_id in clip_ids:
+            _render_in_background(
+                clip_id,
+                burn_captions=payload.burn_captions,
+                vertical=payload.vertical,
+            )
+        return [_clip_out(clip) for clip in clips]
+
     rendered: list[ClipOut] = []
     for clip in clips:
         try:
@@ -119,6 +162,19 @@ def render_project_clips(
             ) from exc
         rendered.append(_clip_out(clip))
     return rendered
+
+
+def _render_in_background(clip_id: str, *, burn_captions: bool, vertical: bool) -> None:
+    def work() -> None:
+        try:
+            with session_scope() as session:
+                render_clip_by_id(
+                    session, clip_id, burn_captions=burn_captions, vertical=vertical
+                )
+        except Exception as exc:  # noqa: BLE001 - the clip records the failure
+            logger.error("render.background_failed", clip_id=clip_id, error=str(exc))
+
+    threading.Thread(target=work, name=f"render-{clip_id}", daemon=True).start()
 
 
 @router.get("/clips/{clip_id}/download")

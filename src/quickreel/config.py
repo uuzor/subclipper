@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     # Queue
     redis_url: str = ""
     task_always_eager: bool = True
+    # Render off-request in a thread when no worker exists. Long renders outlive
+    # hosting proxies' request timeouts, and the proxy answers 502 while ffmpeg
+    # keeps running, so the caller sees failure for work that succeeds. Off by
+    # default so a local run and the test suite keep the synchronous contract
+    # where the response body is the finished clip.
+    render_in_background: bool = False
 
     # Provider selection
     transcription_provider: str = "auto"

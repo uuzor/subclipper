@@ -21,17 +21,27 @@ def process_project(self, project_id: str) -> str:  # pragma: no cover - worker 
 
 
 @shared_task(name="quickreel.render_clip", bind=True, max_retries=0)
-def render_clip(self, clip_id: str, burn_captions: bool = True) -> str:  # pragma: no cover
+def render_clip(
+    self, clip_id: str, burn_captions: bool = True, vertical: bool = True
+) -> str:  # pragma: no cover - worker path
     from ..rendering.renderer import render_clip_by_id
 
     with session_scope() as session:
-        render_clip_by_id(session, clip_id, burn_captions=burn_captions)
+        render_clip_by_id(
+            session, clip_id, burn_captions=burn_captions, vertical=vertical
+        )
     return clip_id
 
 
 def enqueue_project(project_id: str) -> None:
     """Dispatch processing, falling back to inline execution when eager."""
     process_project.delay(project_id)
+
+
+def enqueue_render(
+    clip_id: str, *, burn_captions: bool = True, vertical: bool = True
+) -> None:
+    render_clip.delay(clip_id, burn_captions=burn_captions, vertical=vertical)
 
 
 @shared_task(name="quickreel.run_due_posts", bind=True, max_retries=0)

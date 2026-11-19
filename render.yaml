@@ -66,6 +66,10 @@ services:
       # an uncapped x264 gets OOM-killed mid-render and takes the service down.
       - key: QUICKREEL_RENDER_THREADS
         value: "2"
+      # A real render outlives Render's edge timeout and the proxy answers 502
+      # while ffmpeg keeps working. Off-request, the caller polls clip status.
+      - key: QUICKREEL_RENDER_IN_BACKGROUND
+        value: "true"
       # AI providers. Without at least one, the pipeline degrades to the
       # deterministic fakes and records that in the project's provider
       # provenance, so a degraded run is visible rather than silent.
