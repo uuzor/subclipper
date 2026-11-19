@@ -560,7 +560,10 @@ because `QUICKREEL_NVIDIA_API_KEY` was never added to the Koyeb service, so
 the provider behind each stage. `{"transcription":"smallest-pulse"}` is the
 signal the speech fix is live, not merely merged.
 
-`QUICKREEL_SMALLEST_API_KEY` is set on the Koyeb service. The image installs
-`hosted-ai`, so providers reach the network with `httpx`, never `requests` -
-`requests` is not installed and an import of it fails at the first call, after
-the upload has already succeeded.
+`QUICKREEL_SMALLEST_API_KEY` is set on the Koyeb service. Providers reach the
+network with `httpx`, which is a declared dependency of both the base install
+and `hosted-ai`. `requests` is not declared; it only arrives transitively
+through `google-api-core`, so it disappears the day `google-generativeai` is
+replaced - which is planned, since that package is deprecated. Importing it
+inside a provider would then fail at the first request, after the upload has
+already succeeded.
