@@ -228,6 +228,94 @@ class _NvidiaClient:
         )
 
 
+class GeminiTranscriptionProvider:
+    """Speech recognition through Gemini, which accepts audio inline.
+
+    The hosted image carries no Whisper weights, and Gemini is already the
+    vision provider, so one key covers both. Audio is cut into bounded chunks so
+    each upload stays small and timestamps can be offset onto the source
+    timeline.
+    """
+
+    name = "gemini-asr"
+
+    _PROMPT = (
+        "Transcribe this audio verbatim, including filler words and false starts. "
+        "Return strict JSON only: "
+        '{"language": str, "segments": [{"start": float, "end": float, "text": str}]}. '
+        "Times are seconds from the start of this audio. Do not translate."
+    )
+
+    def __init__(self) -> None:
+        settings = get_settings()
+        self._settings = settings
+        if not settings.gemini_api_key:
+            raise ProviderUnavailable("QUICKREEL_GEMINI_API_KEY is not set.")
+        try:
+            import google.generativeai as genai  # type: ignore import-not-found
+        except ImportError as exc:  # pragma: no cover - optional extra
+            raise ProviderUnavailable(
+                "google-generativeai is not installed. Install with `pip install -e '.[ai]'`."
+            ) from exc
+        genai.configure(api_key=settings.gemini_api_key)
+        self._model = genai.GenerativeModel(settings.gemini_model)
+
+    def transcribe(self, audio_path: Path) -> TranscriptResult:
+        settings = self._settings
+        audio_path = Path(audio_path)
+        total_seconds = ffmpeg.probe(audio_path).duration_seconds or 0.0
+        chunk = max(settings.nvidia_asr_chunk_seconds, 10.0)
+        if total_seconds <= 0:
+            offsets = [0.0]
+        else:
+            count = math.ceil(total_seconds / chunk)
+            # Encoders pad the container, so a sliver tail is not worth a
+            # whole extra request.
+            if count > 1 and total_seconds - (count - 1) * chunk < 1.0:
+                count -= 1
+            count = min(count, max(settings.nvidia_asr_max_chunks, 1))
+            offsets = [index * chunk for index in range(max(count, 1))]
+
+        segments: list[TranscriptSegment] = []
+        language = "en"
+        for offset in offsets:
+            piece = ffmpeg.slice_audio(
+                audio_path,
+                settings.artifacts_dir / f"{audio_path.stem}_gemini_asr_{int(offset)}.wav",
+                start=offset,
+                duration=chunk,
+            )
+            payload = _extract_json(self._transcribe_chunk(piece))
+            language = payload.get("language") or language
+            for item in payload.get("segments", []):
+                if not isinstance(item, dict) or "text" not in item:
+                    continue
+                text = str(item["text"]).strip()
+                if not text:
+                    continue
+                start = float(item.get("start", 0.0)) + offset
+                end = float(item.get("end", start)) + offset
+                segments.append(
+                    TranscriptSegment(start=start, end=max(end, start), text=text, words=[])
+                )
+        if not segments:
+            raise ProviderUnavailable("Gemini transcription returned no segments")
+        segments.sort(key=lambda segment: segment.start)
+        return TranscriptResult(
+            language=str(language),
+            text=" ".join(segment.text for segment in segments).strip(),
+            segments=segments,
+            provider=self.name,
+        )
+
+    def _transcribe_chunk(self, path: Path) -> str:
+        response = self._model.generate_content(
+            [self._PROMPT, {"mime_type": "audio/wav", "data": path.read_bytes()}],
+            request_options={"timeout": self._settings.vision_timeout_seconds},
+        )
+        return getattr(response, "text", "") or ""
+
+
 class NvidiaTranscriptionProvider:
     """Speech recognition through a hosted omni model.
 

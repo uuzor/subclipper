@@ -61,13 +61,19 @@ class _FallbackProxy:
 
 
 def _auto_with_runtime_fallback(kind: str, real_factory, fake_factory):
-    fake = fake_factory()
     try:
         real = real_factory()
     except Exception as exc:  # noqa: BLE001
-        logger.info("provider.fallback_to_fake", kind=kind, reason=str(exc))
-        return fake
-    return _FallbackProxy(kind, real, fake)
+        # A provider that cannot even be constructed is a configuration error,
+        # not a transient fault: nothing will recover by retrying the call. With
+        # fallback disabled it must raise here, otherwise a deploy missing an
+        # optional dependency silently transcribes every video with the fake
+        # provider and produces clips from invented text.
+        if not get_settings().allow_provider_fallback:
+            raise
+        logger.warning("provider.fallback_to_fake", kind=kind, reason=str(exc))
+        return fake_factory()
+    return _FallbackProxy(kind, real, fake_factory())
 
 
 def get_transcription_provider() -> TranscriptionProvider:
@@ -80,12 +86,25 @@ def get_transcription_provider() -> TranscriptionProvider:
         return FasterWhisperTranscriptionProvider()
     if settings.transcription_provider == "nvidia":
         return NvidiaTranscriptionProvider()
+    if settings.transcription_provider == "gemini":
+        from .providers import GeminiTranscriptionProvider
+
+        return GeminiTranscriptionProvider()
     # ``auto`` prefers hosted speech when a key is present: it needs no model
     # weights, which is the difference between working and not working on a
     # small container.
     if settings.nvidia_api_key:
         return _auto_with_runtime_fallback(
             "transcription", NvidiaTranscriptionProvider, fakes.FakeTranscriptionProvider
+        )
+    # Gemini accepts audio and its key is already configured for vision, so it
+    # is the cheapest hosted speech option. Prefer it over local Whisper, which
+    # needs model weights the small hosting image does not carry.
+    if settings.gemini_api_key:
+        from .providers import GeminiTranscriptionProvider
+
+        return _auto_with_runtime_fallback(
+            "transcription", GeminiTranscriptionProvider, fakes.FakeTranscriptionProvider
         )
     return _auto_with_runtime_fallback(
         "transcription", FasterWhisperTranscriptionProvider, fakes.FakeTranscriptionProvider

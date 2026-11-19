@@ -381,3 +381,30 @@ def test_gemini_load_frame_returns_sdk_blob_dict(tmp_path):
     png = tmp_path / "frame.png"
     png.write_bytes(b"\x89PNG\r\n")
     assert GeminiVisionProvider._load_frame(png)["mime_type"] == "image/png"
+
+
+def test_construction_failure_raises_when_fallback_is_disabled(monkeypatch):
+    """A provider that cannot be built must not degrade to the fake in production.
+
+    Regression: the construction-time path ignored ``allow_provider_fallback``,
+    so a deploy whose image lacked the optional dependency silently transcribed
+    every video with the fake provider and built clips from invented text.
+    """
+
+    class Unbuildable:
+        def __init__(self) -> None:
+            raise RuntimeError("optional dependency missing")
+
+    # Read the live cached settings rather than the session fixture: other tests
+    # clear the cache, which leaves that fixture pointing at a stale instance.
+    settings = get_settings()
+    monkeypatch.setattr(settings, "allow_provider_fallback", False)
+    monkeypatch.setattr(settings, "transcription_provider", "auto")
+    monkeypatch.setattr(settings, "nvidia_api_key", None)
+    monkeypatch.setattr(settings, "gemini_api_key", None)
+    monkeypatch.setattr(
+        "quickreel.ai.providers.FasterWhisperTranscriptionProvider", Unbuildable
+    )
+
+    with pytest.raises(RuntimeError, match="optional dependency missing"):
+        get_transcription_provider()
