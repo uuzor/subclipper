@@ -26,6 +26,9 @@ Always run `make lint` and `make test` before finishing a change. Both must pass
 
 - ffmpeg and ffprobe must be on PATH. Install with
   `sudo apt-get install -y ffmpeg`. The app refuses to boot without them.
+  Without root, `pip install static-ffmpeg` into `.venv` and put its `bin/linux`
+  directory on PATH instead; it ships both binaries. `imageio-ffmpeg` is not
+  enough on its own because it has no `ffprobe`.
 - Python 3.11+. The venv lives at `.venv`.
 - Tests set `QUICKREEL_*` env vars in `tests/conftest.py` *before* importing the
   app, because settings and the DB engine are cached via `lru_cache`. If you add
