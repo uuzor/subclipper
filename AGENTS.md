@@ -587,3 +587,18 @@ Without the explicit `sha` the deployment definition stores an empty sha and
 silently tracks the branch, which makes it impossible to tell which commit is
 live. Confirm with the frontend asset hash on `/` matching the local
 `frontend/dist/assets/index-*.js` from `npm run build`.
+
+Even with the sha passed, `definition.git.sha` still reads back empty on the
+deployment. That field is not the proof. The commit that actually built is in
+`metadata.git.git_env.sha`, and `provisioning_info.sha` repeats it:
+
+```
+curl -s "https://app.koyeb.com/v1/deployments/<deployment-id>" \
+  -H "Authorization: Bearer $TOKEN" \
+  | jq -r '.deployment | .metadata.git.git_env.sha, .provisioning_info.sha'
+```
+
+`KOYEB_TOKEN` and `KOYEB_SERVICE_ID` live in `.env` (gitignored). The app never
+reads them; they are only for the redeploy call above. The service is
+`01794dcc-c4b9-4f0f-9b7f-451cfd00bb47` and its public host is
+`quickreel-visualisecrypto-4861c3dc.apps.mistral.run`.
