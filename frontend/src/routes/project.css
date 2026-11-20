@@ -348,7 +348,27 @@
   color: var(--ink-faint);
 }
 
-.clip-pending {
+/* The rendered clip itself. Both max-* limits apply, so a 9:16 frame shrinks
+   to fit the height cap and a landscape frame to the card width, with the
+   intrinsic aspect ratio preserved either way. */
+.clip-video {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 520px;
+  margin: var(--s3) auto var(--s4);
+  border-radius: 10px;
+  background: #000;
+}
+
+.clip-video-pending {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 9 / 16;
+  max-height: 260px;
+  border: 1px dashed var(--line);
   font-size: 12px;
   color: var(--ink-faint);
 }

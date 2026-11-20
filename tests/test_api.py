@@ -100,6 +100,46 @@ def test_download_before_render_returns_conflict(auth_client, sample_video):
     assert response.status_code == 409
 
 
+def test_stream_clip_serves_inline_playable_video(auth_client, sample_video):
+    """The UI plays clips with a <video> tag, which needs an inline response and
+    range support. The download route sends Content-Disposition: attachment and
+    would be saved rather than played.
+    """
+    project = _create_and_upload(auth_client, sample_video)
+    project_id = project["id"]
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+    rendered = auth_client.post(
+        f"/api/v1/projects/{project_id}/render",
+        json={"max_clips": 1, "burn_captions": True},
+    )
+    assert rendered.status_code == 200, rendered.text
+    clip_id = rendered.json()[0]["id"]
+
+    video = auth_client.get(f"/api/v1/clips/{clip_id}/video")
+    assert video.status_code == 200
+    assert video.headers["content-type"] == "video/mp4"
+    assert video.headers["content-disposition"].startswith("inline")
+    assert len(video.content) > 0
+
+    # Browsers, Safari especially, probe with a Range request before playing.
+    partial = auth_client.get(
+        f"/api/v1/clips/{clip_id}/video", headers={"Range": "bytes=0-99"}
+    )
+    assert partial.status_code == 206
+    assert partial.headers["content-range"].startswith("bytes 0-99/")
+    assert len(partial.content) == 100
+    assert partial.content == video.content[:100]
+
+
+def test_stream_clip_before_render_returns_conflict(auth_client, sample_video):
+    project = _create_and_upload(auth_client, sample_video)
+    project_id = project["id"]
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+    clip_id = auth_client.get(f"/api/v1/projects/{project_id}/clips").json()[0]["id"]
+
+    assert auth_client.get(f"/api/v1/clips/{clip_id}/video").status_code == 409
+
+
 def test_clip_filters(auth_client, sample_video):
     project = _create_and_upload(auth_client, sample_video)
     project_id = project["id"]

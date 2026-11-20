@@ -303,6 +303,8 @@ export const api = {
 
   clipDownloadUrl: (clipId: string) => `${BASE}/clips/${clipId}/download`,
 
+  clipVideoUrl: (clipId: string) => `${BASE}/clips/${clipId}/video`,
+
   /* ---- Publishing ---- */
 
   listPlatforms: () =>

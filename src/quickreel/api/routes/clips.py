@@ -233,3 +233,24 @@ def download_clip(
         media_type="video/mp4",
         filename=f"quickreel-{clip.id}.mp4",
     )
+
+
+@router.get("/clips/{clip_id}/video")
+def stream_clip(
+    clip_id: str,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> FileResponse:
+    """Same bytes as the download, served inline so a <video> tag can play it.
+
+    FileResponse sends ``Accept-Ranges`` and honours Range headers, which
+    Safari requires before it will play any video at all.
+    """
+    clip = _scoped_clip(db, clip_id, workspace.id)
+    if not clip.render_path or not Path(clip.render_path).exists():
+        raise HTTPException(status_code=409, detail="clip has not been rendered yet")
+    return FileResponse(
+        clip.render_path,
+        media_type="video/mp4",
+        headers={"Content-Disposition": "inline"},
+    )

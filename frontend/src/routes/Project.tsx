@@ -45,10 +45,16 @@ export default function Project() {
     void load();
   }, [load]);
 
-  // Poll only while the pipeline is still moving.
+  // Poll while the pipeline is moving, and also while a clip is rendering.
+  // Render runs on a background thread after the project reaches ``ready``, so
+  // keying only off project status leaves the page frozen on "rendering…"
+  // until a manual reload. ``candidate`` is not included on purpose: it means
+  // "not rendered yet", which no amount of polling will change.
   useEffect(() => {
     if (!project) return;
-    const done = isReady(project.status) || isFailed(project.status);
+    const clipsRendering = project.clips.some((c) => c.status === "rendering");
+    const done =
+      (isReady(project.status) || isFailed(project.status)) && !clipsRendering;
     if (done) {
       if (timer.current) window.clearTimeout(timer.current);
       return;
@@ -305,6 +311,22 @@ function ClipCard({
         </span>
       </div>
 
+      {rendered ? (
+        <video
+          className="clip-video"
+          src={api.clipVideoUrl(clip.id)}
+          controls
+          playsInline
+          preload="metadata"
+        />
+      ) : (
+        <div className="clip-video clip-video-pending">
+          <span className="mono">
+            {clip.status === "rendering" ? "rendering…" : "not rendered"}
+          </span>
+        </div>
+      )}
+
       <h3 className="clip-title">{clip.title}</h3>
 
       {/* Some providers return the hook as the excerpt verbatim; never print it twice. */}
@@ -323,7 +345,7 @@ function ClipCard({
 
       <div className="clip-foot">
         <span className="mono clip-dur">{duration(clip.duration_seconds)}</span>
-        {rendered ? (
+        {rendered && (
           <a
             className="btn btn-primary clip-dl"
             href={api.clipDownloadUrl(clip.id)}
@@ -332,16 +354,16 @@ function ClipCard({
             <IconDownload size={17} />
             Download MP4
           </a>
-        ) : (
-          <span className="mono clip-pending">
-            {clip.status === "rendering" ? "rendering…" : "not rendered"}
-          </span>
         )}
       </div>
 
       {rendered && typeof clip.render_meta.size_bytes === "number" && (
         <p className="mono clip-render-note">
-          1080×1920 · captions burned · {bytes(clip.render_meta.size_bytes as number)}
+          {typeof clip.render_meta.width === "number" &&
+          typeof clip.render_meta.height === "number"
+            ? `${clip.render_meta.width}×${clip.render_meta.height}`
+            : "vertical"}{" "}
+          · captions burned · {bytes(clip.render_meta.size_bytes as number)}
         </p>
       )}
 
