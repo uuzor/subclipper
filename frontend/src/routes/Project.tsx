@@ -129,7 +129,9 @@ export default function Project() {
   const failed = isFailed(project.status);
   const ready = isReady(project.status);
   const stage = stageIndex(project.status);
-  const hasRendered = project.clips.some((c) => c.status === "rendered");
+  const hasRendered = project.clips.some(
+    (c) => c.status === "rendered" && c.render_available,
+  );
 
   return (
     <div className="shell pj">
@@ -295,7 +297,12 @@ function ClipCard({
   active: boolean;
   onFocus: () => void;
 }) {
+  // A row can say "rendered" after its MP4 is gone - the container restarted on
+  // storage that does not survive it. Pointing <video> at that URL paints a
+  // blank box, so treat the missing bytes as its own state and offer a re-render.
   const rendered = clip.status === "rendered";
+  const playable = rendered && clip.render_available;
+  const lost = rendered && !clip.render_available;
   const hookIsExcerpt = clip.hook.trim() === clip.transcript_excerpt.trim();
   return (
     <article
@@ -311,7 +318,7 @@ function ClipCard({
         </span>
       </div>
 
-      {rendered ? (
+      {playable ? (
         <video
           className="clip-video"
           src={api.clipVideoUrl(clip.id)}
@@ -322,7 +329,11 @@ function ClipCard({
       ) : (
         <div className="clip-video clip-video-pending">
           <span className="mono">
-            {clip.status === "rendering" ? "rendering…" : "not rendered"}
+            {lost
+              ? "render expired — re-render to restore"
+              : clip.status === "rendering"
+                ? "rendering…"
+                : "not rendered"}
           </span>
         </div>
       )}
@@ -345,7 +356,7 @@ function ClipCard({
 
       <div className="clip-foot">
         <span className="mono clip-dur">{duration(clip.duration_seconds)}</span>
-        {rendered && (
+        {playable && (
           <a
             className="btn btn-primary clip-dl"
             href={api.clipDownloadUrl(clip.id)}
@@ -357,7 +368,7 @@ function ClipCard({
         )}
       </div>
 
-      {rendered && typeof clip.render_meta.size_bytes === "number" && (
+      {playable && typeof clip.render_meta.size_bytes === "number" && (
         <p className="mono clip-render-note">
           {typeof clip.render_meta.width === "number" &&
           typeof clip.render_meta.height === "number"
@@ -367,7 +378,7 @@ function ClipCard({
         </p>
       )}
 
-      {rendered && <SchedulePanel clip={clip} />}
+      {playable && <SchedulePanel clip={clip} />}
     </article>
   );
 }

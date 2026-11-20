@@ -195,6 +195,29 @@ def test_reprocess_replaces_renders_without_orphaning_files(auth_client, sample_
     assert not first_render.exists(), "stale render should be removed on re-process"
 
 
+def test_clip_reports_when_its_render_file_is_gone(auth_client, sample_video):
+    """A rendered clip whose MP4 vanished must not look playable.
+
+    Ephemeral storage keeps the row across a restart and loses the file, which
+    left the page pointing <video> at a 409 and painting an empty box.
+    """
+    project = _create_and_upload(auth_client, sample_video)
+    project_id = project["id"]
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+    clip = auth_client.post(
+        f"/api/v1/projects/{project_id}/render", json={"max_clips": 1}
+    ).json()[0]
+    assert clip["status"] == "rendered"
+    assert clip["render_available"] is True
+
+    Path(clip["render_path"]).unlink()
+
+    detail = auth_client.get(f"/api/v1/projects/{project_id}").json()
+    assert detail["clips"][0]["status"] == "rendered"
+    assert detail["clips"][0]["render_available"] is False
+    assert auth_client.get(f"/api/v1/clips/{clip['id']}/video").status_code == 409
+
+
 def test_render_honours_vertical_flag(auth_client, sample_video):
     from quickreel.media import ffmpeg
 

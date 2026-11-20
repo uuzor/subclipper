@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from pydantic import (
     BaseModel,
@@ -78,11 +79,21 @@ class ClipOut(BaseModel):
     status: str
     render_path: str | None = None
     render_meta: dict = Field(default_factory=dict)
+    # ``status`` records what the database last saw, which can outlive the file:
+    # a container restart on ephemeral storage keeps the row and loses the MP4.
+    # The client needs to tell "rendered, playable" from "rendered, bytes gone"
+    # so it can offer a re-render instead of painting an empty <video>.
+    render_available: bool = False
 
     _coerce_components = field_validator("score_components", "score_breakdown", mode="before")(
         _none_to_empty
     )
     _coerce_render_meta = field_validator("render_meta", mode="before")(_none_to_empty)
+
+    @model_validator(mode="after")
+    def _mark_render_available(self) -> ClipOut:
+        self.render_available = bool(self.render_path) and Path(self.render_path).is_file()
+        return self
 
     @model_validator(mode="after")
     def _fill_duration(self) -> ClipOut:

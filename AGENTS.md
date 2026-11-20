@@ -508,6 +508,19 @@ raises. This is why Gemini ASR exists: `auto` prefers a hosted speech provider
 when a key is present, and Gemini accepts audio, so one key covers speech and
 vision on a small image.
 
+**Hosted storage is ephemeral, so a render can outlive its file.** The Koyeb
+service runs with `volumes: []` while the app writes SQLite, uploads and renders
+under `/var/data`. Every restart, redeploy or sleep/wake wipes all of it. The
+symptom is not an error: the clip row still says `rendered`, the page still
+points `<video>` at `/clips/{id}/video`, that endpoint answers 409 because
+`render_path` no longer exists, and the browser paints an empty box. That is
+what "no video displayed" looks like, and it reproduces on a fresh deploy only
+after the first restart. `ClipOut.render_available` reports whether the bytes are
+actually on disk, and the project page uses it to show "render expired" instead
+of an empty player. Creating a volume is not available on this plan: the API
+takes `volume_type: 1` but every region answers "Your organization does not have
+access to volumes". Until storage is persistent, treat renders as disposable.
+
 ## Provider selection: which model does which job
 
 Measured on the same 20.4s clip, against the live APIs, not from model

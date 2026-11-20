@@ -53,6 +53,7 @@ const DEMO_CLIPS: Clip[] = [
     status: "candidate",
     render_path: null,
     render_meta: {},
+    render_available: false,
   },
   {
     id: "d2",
@@ -94,6 +95,7 @@ const DEMO_CLIPS: Clip[] = [
     status: "candidate",
     render_path: null,
     render_meta: {},
+    render_available: false,
   },
   {
     id: "d3",
@@ -135,6 +137,7 @@ const DEMO_CLIPS: Clip[] = [
     status: "candidate",
     render_path: null,
     render_meta: {},
+    render_available: false,
   },
 ];
 

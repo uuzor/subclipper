@@ -83,6 +83,8 @@ export interface Clip {
   status: ClipStatus;
   render_path: string | null;
   render_meta: Record<string, unknown>;
+  /** False when the row says rendered but the MP4 is missing on disk. */
+  render_available: boolean;
 }
 
 export interface Project {
