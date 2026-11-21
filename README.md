@@ -93,15 +93,17 @@ The app builds no links from the request host, so this is the only thing that
 has to be right for a forwarded deployment. Both targets bind `0.0.0.0`, so the
 port forward reaches them.
 
-### Deploying to Render
+### Deploying to Northflank
 
-`Dockerfile` and `render.yaml` describe the deployment: one container serving
-the API and the built SPA, PostgreSQL for state, and a persistent disk for
-uploads and renders. Point Render at this repository and pick **Blueprint**.
+`Dockerfile` describes the deployment: one combined service serving the API and
+the built SPA, with PostgreSQL for state and S3-compatible object storage for
+uploads and renders. There is no persistent volume, so nothing durable lives on
+the container's disk. See `docs/deployment.md` for the full walkthrough.
 
 ```bash
 # Verify a running deployment
 curl -fsS https://<host>/healthz
+curl -fsS https://<host>/readyz                                        # which provider serves each stage
 curl -fsS -o /dev/null -w '%{http_code}\n' https://<host>/workbench   # SPA deep link
 ```
 

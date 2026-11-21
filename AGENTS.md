@@ -458,11 +458,11 @@ The trend feature targets a creator's own back catalogue, matched against
 official API signals; every project records `license_note` and `authorized_by`.
 See the README section "Trends: repurpose, do not re-upload".
 
-## Deployment: Render, and the two traps it exposed
+## Deployment: Northflank, and the two traps it exposed
 
-The app ships as one container (`Dockerfile`, `render.yaml`, `docs/deployment.md`)
-running uvicorn with eager Celery tasks. Two failures only appeared on a real
-deploy, and both are easy to reintroduce.
+The app ships as one container (`Dockerfile`, `docs/deployment.md`) running
+uvicorn with eager Celery tasks. Two failures only appeared on a real deploy,
+and both are easy to reintroduce.
 
 **Optional-dependency fallbacks must fail in the constructor.** The registry
 chooses between a real provider and its fake by catching `ProviderUnavailable`

@@ -78,18 +78,27 @@ over-scoping, and a shorter list is easier to approve.
 2. **Meta second.** Business Verification is the slow part, so start it as soon
    as the application is filed rather than waiting for the review itself.
 3. **Google third.** The consent-screen verification needs a privacy policy at a
-   public URL, which is now served at `/privacy` on `clipviralmoment.com`.
+   public URL, which is served at `/privacy`. It must be reachable on the
+   production origin before this is filed.
 
 ## Before filing — checklist
 
 Each platform document ends with its own checklist. These apply to all three:
 
-- [ ] Privacy policy live at `https://clipviralmoment.com/privacy`.
-- [ ] Terms live at `https://clipviralmoment.com/terms`.
+- [x] Privacy policy served at `/privacy`, with the YouTube API Services and
+      Limited Use sections the Google review looks for.
+- [x] Terms served at `/terms`.
+- [ ] Both reachable at `https://clipviralmoment.com/...` — blocked on the
+      domain being registered and attached. Until then the pages are live on the
+      deployment's `*.code.run` hostname, and a reviewer given that URL can read
+      them, but every form asks for the production origin.
 - [ ] The support and privacy mailboxes in `frontend/src/lib/legal.ts` actually
-      receive mail.
+      receive mail. The addresses are `privacy@` and `support@clipviralmoment.com`;
+      they need MX records once the domain is registered.
 - [ ] `QUICKREEL_PUBLIC_BASE_URL` points at the public origin, so the OAuth
-      redirect URI in the form matches what the app sends.
+      redirect URI in the form matches what the app sends. It currently points at
+      the `*.code.run` hostname and must move to `https://clipviralmoment.com`
+      in the same change that attaches the domain.
 - [ ] The demo account is seeded and the reviewer credentials are in the form.
 - [ ] A real clip has been published end to end to a private test account, so
       the flow is known to work before a reviewer tries it.
