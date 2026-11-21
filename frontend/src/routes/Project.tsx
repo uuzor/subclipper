@@ -1,0 +1,395 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useParams } from "react-router-dom";
+import { api, ApiError } from "../lib/api";
+import type { Clip, ExportPlatform, ExportPlatformKey, ProjectDetail } from "../lib/types";
+import { Timeline } from "../components/Timeline";
+import { ScoreBreakdown } from "../components/ScoreBreakdown";
+import { SchedulePanel } from "../components/SchedulePanel";
+import {
+  IconArrow,
+  IconCheck,
+  IconDownload,
+  IconSpinner,
+  IconWarn,
+} from "../components/icons";
+import { bytes, duration, timecode, titleCase } from "../lib/format";
+import { STAGES, isFailed, isReady, stageIndex } from "../lib/pipeline";
+import "./project.css";
+
+export default function Project() {
+  const { projectId = "" } = useParams();
+  const [project, setProject] = useState<ProjectDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [missing, setMissing] = useState(false);
+  const [rendering, setRendering] = useState(false);
+  const [renderError, setRenderError] = useState<string | null>(null);
+  const [activeClipId, setActiveClipId] = useState<string | undefined>();
+  const [platforms, setPlatforms] = useState<ExportPlatform[]>([]);
+  const [platform, setPlatform] = useState<ExportPlatformKey>("tiktok");
+  const timer = useRef<number | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api.getProject(projectId);
+      setProject(data);
+      setMissing(false);
+      return data;
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) setMissing(true);
+      else setError(err instanceof Error ? err.message : "Could not load project.");
+      return null;
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // Poll while the pipeline is moving, and also while a clip is rendering.
+  // Render runs on a background thread after the project reaches ``ready``, so
+  // keying only off project status leaves the page frozen on "rendering…"
+  // until a manual reload. ``candidate`` is not included on purpose: it means
+  // "not rendered yet", which no amount of polling will change.
+  useEffect(() => {
+    if (!project) return;
+    const clipsRendering = project.clips.some((c) => c.status === "rendering");
+    const done =
+      (isReady(project.status) || isFailed(project.status)) && !clipsRendering;
+    if (done) {
+      if (timer.current) window.clearTimeout(timer.current);
+      return;
+    }
+    timer.current = window.setTimeout(() => void load(), 2500);
+    return () => {
+      if (timer.current) window.clearTimeout(timer.current);
+    };
+  }, [project, load]);
+
+  useEffect(() => {
+    if (project && project.clips.length && !activeClipId) {
+      setActiveClipId(project.clips[0]?.id);
+    }
+  }, [project, activeClipId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .exportPlatforms()
+      .then((list) => {
+        if (!cancelled && list.length) {
+          setPlatforms(list);
+          setPlatform((current) =>
+            list.some((p) => p.key === current) ? current : list[0]!.key,
+          );
+        }
+      })
+      .catch(() => {
+        // The picker falls back to the default target; rendering still works.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function onRender() {
+    setRendering(true);
+    setRenderError(null);
+    try {
+      const clips = await api.render(projectId, { max_clips: 5, platform });
+      setProject((p) => (p ? { ...p, clips } : p));
+      setActiveClipId((id) => id ?? clips[0]?.id);
+    } catch (err) {
+      setRenderError(err instanceof Error ? err.message : "Rendering failed.");
+    } finally {
+      setRendering(false);
+    }
+  }
+
+  if (missing) {
+    return (
+      <div className="shell pj-empty">
+        <h1 className="pj-h1">That project is gone.</h1>
+        <p className="pj-sub">It may have been deleted. Start another one.</p>
+        <Link to="/workbench" className="btn btn-primary">
+          New project
+        </Link>
+      </div>
+    );
+  }
+
+  if (!project) {
+    return (
+      <div className="shell pj-loading">
+        <IconSpinner size={22} />
+        <span className="mono">loading project…</span>
+      </div>
+    );
+  }
+
+  const failed = isFailed(project.status);
+  const ready = isReady(project.status);
+  const stage = stageIndex(project.status);
+  const hasRendered = project.clips.some(
+    (c) => c.status === "rendered" && c.render_available,
+  );
+
+  return (
+    <div className="shell pj">
+      <header className="pj-head">
+        <div>
+          <h1 className="pj-title">{project.title}</h1>
+          <p className="mono pj-meta">
+            {project.source_kind === "url" && project.source_url
+              ? project.source_url
+              : `upload · ${project.media ? bytes(project.media.size_bytes) : "—"}`}
+          </p>
+        </div>
+        <div className="pj-head-right">
+          {project.media && (
+            <span className="mono pj-chip">
+              {project.media.width}×{project.media.height}
+            </span>
+          )}
+          {project.media && (
+            <span className="mono pj-chip">{duration(project.media.duration_seconds)}</span>
+          )}
+          <span className={`mono pj-chip pj-chip-${ready ? "ok" : failed ? "bad" : "live"}`}>
+            {project.status}
+          </span>
+        </div>
+      </header>
+
+      {error && (
+        <div className="alert" role="alert">
+          <IconWarn size={18} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {/* ---- still working ---- */}
+      {!ready && !failed && (
+        <section className="stages" aria-live="polite">
+          {STAGES.map((s, i) => {
+            const state = i < stage ? "done" : i === stage ? "active" : "todo";
+            return (
+              <div className={`stage is-${state}`} key={s.key}>
+                <span className="stage-mark">
+                  {state === "done" ? (
+                    <IconCheck size={16} />
+                  ) : state === "active" ? (
+                    <IconSpinner size={16} />
+                  ) : (
+                    <span className="stage-dot" />
+                  )}
+                </span>
+                <span className="stage-body">
+                  <strong>{s.label}</strong>
+                  <em>{s.detail}</em>
+                </span>
+              </div>
+            );
+          })}
+        </section>
+      )}
+
+      {/* ---- failed ---- */}
+      {failed && (
+        <section className="failed">
+          <IconWarn size={22} />
+          <div>
+            <h2 className="failed-h">This run stopped.</h2>
+            <p className="failed-p">{project.error ?? "The pipeline could not finish."}</p>
+            <p className="failed-hint">
+              Nothing was invented to cover the gap. Fix the source and start again.
+            </p>
+          </div>
+          <Link to="/workbench" className="btn btn-ghost">
+            Start over
+          </Link>
+        </section>
+      )}
+
+      {/* ---- clips ---- */}
+      {ready && project.media && (
+        <>
+          <section className="pj-overview">
+            <Timeline
+              durationSeconds={project.media.duration_seconds}
+              clips={project.clips}
+              activeClipId={activeClipId}
+              onSelect={setActiveClipId}
+            />
+            <div className="pj-providers mono">
+              <span className="pj-providers-cap">providers</span>
+              {Object.entries(project.providers).map(([k, v]) => (
+                <span key={k} className="pj-provider">
+                  {k}: <strong>{v}</strong>
+                </span>
+              ))}
+            </div>
+          </section>
+
+          <section className="clips-head">
+            <h2 className="pj-h2">
+              {project.clips.length} moment{project.clips.length === 1 ? "" : "s"} found
+            </h2>
+            <div className="clips-actions">
+              {renderError && <span className="clips-err">{renderError}</span>}
+              {platforms.length > 1 && (
+                <label className="clips-platform">
+                  <span>Format</span>
+                  <select
+                    value={platform}
+                    onChange={(e) =>
+                      setPlatform(e.target.value as ExportPlatformKey)
+                    }
+                    disabled={rendering}
+                  >
+                    {platforms.map((p) => (
+                      <option key={p.key} value={p.key}>
+                        {p.label} · {p.aspect}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <button
+                className="btn btn-primary"
+                onClick={onRender}
+                disabled={rendering || !project.clips.length}
+              >
+                {rendering ? (
+                  <>
+                    <IconSpinner size={17} /> Rendering…
+                  </>
+                ) : (
+                  <>
+                    {hasRendered ? "Re-render clips" : "Render clips"}
+                    <IconArrow size={17} />
+                  </>
+                )}
+              </button>
+            </div>
+          </section>
+
+          <div className="clips">
+            {project.clips.map((clip) => (
+              <ClipCard
+                key={clip.id}
+                clip={clip}
+                active={clip.id === activeClipId}
+                onFocus={() => setActiveClipId(clip.id)}
+              />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ClipCard({
+  clip,
+  active,
+  onFocus,
+}: {
+  clip: Clip;
+  active: boolean;
+  onFocus: () => void;
+}) {
+  // A row can say "rendered" after its MP4 is gone - the container restarted on
+  // storage that does not survive it. Pointing <video> at that URL paints a
+  // blank box, so treat the missing bytes as its own state and offer a re-render.
+  const rendered = clip.status === "rendered";
+  const playable = rendered && clip.render_available;
+  const lost = rendered && !clip.render_available;
+  const failed = clip.status === "render_failed";
+  const hookIsExcerpt = clip.hook.trim() === clip.transcript_excerpt.trim();
+  return (
+    <article
+      className={`clip${active ? " is-active" : ""}`}
+      onMouseEnter={onFocus}
+      onFocus={onFocus}
+    >
+      <div className="clip-top">
+        <span className="mono clip-rank">#{String(clip.rank).padStart(2, "0")}</span>
+        <span className="mono clip-type">{titleCase(clip.moment_type)}</span>
+        <span className="mono clip-range">
+          {timecode(clip.start_seconds)} – {timecode(clip.end_seconds)}
+        </span>
+      </div>
+
+      {playable ? (
+        <video
+          className="clip-video"
+          src={api.clipVideoUrl(clip.id)}
+          controls
+          playsInline
+          preload="metadata"
+        />
+      ) : (
+        <div className="clip-video clip-video-pending">
+          <span className="mono">
+            {lost
+              ? "render expired — re-render to restore"
+              : clip.status === "rendering"
+                ? "rendering…"
+                : failed
+                  ? "render failed"
+                  : "not rendered"}
+          </span>
+        </div>
+      )}
+
+      {/* A failed render previously said only "rendering…" forever, so the one
+          piece of information that could fix it stayed in the server log. */}
+      {failed && (
+        <p className="mono clip-render-error">
+          {clip.render_error ?? "The render failed without reporting a reason."}
+        </p>
+      )}
+
+      <h3 className="clip-title">{clip.title}</h3>
+
+      {/* Some providers return the hook as the excerpt verbatim; never print it twice. */}
+      {hookIsExcerpt ? (
+        <p className="clip-excerpt clip-excerpt-sole">“{clip.transcript_excerpt}”</p>
+      ) : (
+        <>
+          <p className="clip-hook">{clip.hook}</p>
+          <p className="clip-excerpt">“{clip.transcript_excerpt}”</p>
+        </>
+      )}
+
+      <p className="clip-rationale">{clip.rationale}</p>
+
+      <ScoreBreakdown clip={clip} />
+
+      <div className="clip-foot">
+        <span className="mono clip-dur">{duration(clip.duration_seconds)}</span>
+        {playable && (
+          <a
+            className="btn btn-primary clip-dl"
+            href={api.clipDownloadUrl(clip.id)}
+            download
+          >
+            <IconDownload size={17} />
+            Download MP4
+          </a>
+        )}
+      </div>
+
+      {playable && typeof clip.render_meta.size_bytes === "number" && (
+        <p className="mono clip-render-note">
+          {typeof clip.render_meta.width === "number" &&
+          typeof clip.render_meta.height === "number"
+            ? `${clip.render_meta.width}×${clip.render_meta.height}`
+            : "vertical"}{" "}
+          · captions burned · {bytes(clip.render_meta.size_bytes as number)}
+        </p>
+      )}
+
+      {playable && <SchedulePanel clip={clip} />}
+    </article>
+  );
+}

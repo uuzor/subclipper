@@ -1,0 +1,254 @@
+.channels {
+  padding-top: var(--s7);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s5);
+}
+
+.channels-head {
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: var(--s5);
+}
+
+.channels-head h1 {
+  font-size: clamp(1.7rem, 3.4vw, 2.4rem);
+  margin-top: var(--s2);
+}
+
+.channels .lede {
+  margin-top: var(--s3);
+  max-width: 66ch;
+  color: var(--ink-soft);
+}
+
+.channels .panel {
+  border: 1px solid var(--rule);
+  border-radius: var(--r-lg);
+  background: var(--paper-raised);
+  padding: var(--s5);
+}
+
+.channels .panel-title {
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: var(--s4);
+}
+
+.channels .empty {
+  color: var(--ink-soft);
+  max-width: 62ch;
+}
+
+/* ---- Watch-a-channel form ---- */
+
+.channel-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s4);
+}
+
+.channel-form label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.channel-form input[type="text"],
+.channel-form textarea {
+  font: inherit;
+  padding: var(--s3);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r-md);
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.channel-form input:focus-visible,
+.channel-form textarea:focus-visible {
+  outline: 2px solid var(--cobalt);
+  outline-offset: 1px;
+}
+
+.channel-form-wide,
+.channel-form-check,
+.channel-form-actions {
+  grid-column: 1 / -1;
+}
+
+.channel-form-check {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: var(--s3);
+}
+
+.channel-form-check input {
+  margin-top: 3px;
+}
+
+.channel-form-check span {
+  max-width: 70ch;
+  color: var(--ink-soft);
+}
+
+.channel-form-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ---- Subscription list ---- */
+
+.subscription-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.subscription-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s4);
+  padding: var(--s4) 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.subscription-row:last-child {
+  border-bottom: none;
+}
+
+.subscription-name {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  font-weight: 600;
+}
+
+.subscription-meta {
+  margin-top: var(--s2);
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.subscription-auth {
+  margin-top: var(--s2);
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.subscription-detail {
+  margin-top: var(--s2);
+  font-size: 13px;
+  color: var(--crimson);
+}
+
+/* ---- Event table ---- */
+
+.event-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.event-table th {
+  text-align: left;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding-bottom: var(--s3);
+}
+
+.event-table td {
+  padding: var(--s3) var(--s3) var(--s3) 0;
+  border-top: 1px solid var(--rule);
+  vertical-align: top;
+}
+
+.event-reason {
+  color: var(--ink-soft);
+}
+
+/* ---- Hub info ---- */
+
+.hub-info {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s4);
+}
+
+.hub-info dt {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: var(--s2);
+}
+
+.hub-info dd {
+  word-break: break-all;
+  color: var(--ink);
+}
+
+/* ---- Status chips (this page's own vocabulary) ---- */
+
+.channels .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: var(--paper-sunken);
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+.channels .chip-active,
+.channels .chip-processed {
+  background: var(--cobalt);
+  color: #fff;
+}
+
+.channels .chip-failed {
+  background: var(--crimson);
+  color: #fff;
+}
+
+.channels .chip-pending,
+.channels .chip-received {
+  background: var(--paper-sunken);
+  color: var(--ink);
+}
+
+.channels .chip-expired,
+.channels .chip-revoked,
+.channels .chip-ignored {
+  background: transparent;
+  border: 1px solid var(--rule-strong);
+  color: var(--ink-faint);
+}
+
+.channels .chip-queued {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.channels .chip-ok {
+  background: var(--cobalt);
+  color: #fff;
+}
+
+.channels .chip-warn {
+  background: var(--crimson);
+  color: #fff;
+}
+
+@media (max-width: 720px) {
+  .channel-form,
+  .hub-info {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

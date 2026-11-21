@@ -1,0 +1,109 @@
+# Render blueprint for QuickReel.
+#
+# Deploy with: Render Dashboard -> New -> Blueprint -> pick this repo.
+#
+# One web service, no managed database. The app keeps its data in SQLite on the
+# mounted disk, and rendered MP4s go to object storage so they survive a restart.
+# The service is a single container on purpose: the disk can only be mounted by
+# one service, so splitting the Celery worker out is the scale-up step.
+
+services:
+  - type: web
+    name: quickreel
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: standard
+    region: oregon
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    envVars:
+      # Production refuses to start on an unsafe configuration: mock publishing,
+      # a missing OAuth state secret, or a non-HTTPS origin all abort boot rather
+      # than fail later at the first publish.
+      - key: QUICKREEL_ENV
+        value: production
+      # SQLite on the mounted disk. One container owns the file, so there is no
+      # second writer to contend with.
+      - key: QUICKREEL_DATABASE_URL
+        value: sqlite+pysqlite:////var/data/quickreel.db
+      # Must be the verified public origin: it is the OAuth redirect base and
+      # decides whether session cookies are marked Secure.
+      - key: QUICKREEL_PUBLIC_BASE_URL
+        sync: false
+      - key: QUICKREEL_CORS_ORIGINS
+        sync: false
+      - key: QUICKREEL_OAUTH_STATE_SECRET
+        generateValue: true
+      - key: QUICKREEL_YOUTUBE_CALLBACK_SECRET
+        generateValue: true
+      # No live platform adapter ships yet, so a publish fails loudly instead of
+      # reporting a success that reached nobody. Mock is not available here:
+      # production rejects it at startup.
+      - key: QUICKREEL_PUBLISHING_MODE
+        value: live
+      # Fake output in production is worse than a visible failure, so a
+      # configured provider that breaks fails the project.
+      - key: QUICKREEL_ALLOW_PROVIDER_FALLBACK
+        value: "false"
+      # In-process execution: a long video blocks its own request, which is the
+      # honest trade for a single container.
+      - key: QUICKREEL_TASK_ALWAYS_EAGER
+        value: "true"
+      - key: QUICKREEL_DATA_DIR
+        value: /var/data
+      # The free instance has 512MB but the host reports its full core count, so
+      # an uncapped x264 gets OOM-killed mid-render and takes the service down.
+      - key: QUICKREEL_RENDER_THREADS
+        value: "2"
+      # A real render outlives Render's edge timeout and the proxy answers 502
+      # while ffmpeg keeps working. Off-request, the caller polls clip status.
+      - key: QUICKREEL_RENDER_IN_BACKGROUND
+        value: "true"
+      # The analysis pipeline is slower than a render, so it needs the same
+      # treatment for the same reason.
+      - key: QUICKREEL_PROCESS_IN_BACKGROUND
+        value: "true"
+      # AI providers. Without at least one, the pipeline degrades to the
+      # deterministic fakes and records that in the project's provider
+      # provenance, so a degraded run is visible rather than silent.
+      # NVIDIA NIM covers speech, vision and moment selection from one endpoint
+      # and needs no model weights in the image, so setting this key alone is
+      # enough. The providers stay on ``auto``: they pick NVIDIA when the key is
+      # present and still honour a Gemini or generic LLM key if that is what
+      # the operator set instead.
+      - key: QUICKREEL_NVIDIA_API_KEY
+        sync: false
+      # YouTube blocks media downloads from datacenter IPs (Render included)
+      # with a bot check, so a cookies jar from a signed-in browser is the
+      # supported fix. Paste the jar's contents here; it is written to an
+      # owner-only temp file at download time.
+      - key: QUICKREEL_DOWNLOADER_COOKIES_TEXT
+        sync: false
+      - key: QUICKREEL_GEMINI_API_KEY
+        sync: false
+      - key: QUICKREEL_LLM_API_KEY
+        sync: false
+      - key: QUICKREEL_LLM_BASE_URL
+        sync: false
+      - key: QUICKREEL_LLM_MODEL
+        sync: false
+      # Rendered clips are written here as well as to the disk. The disk is
+      # wiped when the service is replaced, which would otherwise leave rows
+      # saying "rendered" with no file to play.
+      - key: QUICKREEL_STORAGE_BACKEND
+        value: s3
+      - key: QUICKREEL_S3_BUCKET
+        sync: false
+      - key: QUICKREEL_S3_ENDPOINT_URL
+        sync: false
+      - key: QUICKREEL_S3_REGION
+        sync: false
+      - key: QUICKREEL_S3_ACCESS_KEY_ID
+        sync: false
+      - key: QUICKREEL_S3_SECRET_ACCESS_KEY
+        sync: false
+    disk:
+      name: quickreel-data
+      mountPath: /var/data
+      sizeGB: 10

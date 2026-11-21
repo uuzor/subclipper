@@ -1,0 +1,503 @@
+"""Project, upload, transcript and moment endpoints."""
+
+from __future__ import annotations
+
+import json
+import shutil
+import threading
+import uuid
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ...config import get_settings
+from ...db import get_db, session_scope
+from ...logging_setup import get_logger
+from ...media.downloader import DownloadError, get_downloader
+from ...media.url_source import BlockedSourceUrl, SourceUrlError, validate_source_url
+from ...models import MediaAsset, Project, ProjectStatus, Workspace
+from ...pipeline.orchestrator import Pipeline, PipelineError
+from ...pipeline.tasks import enqueue_project
+from ...schemas import (
+    ProjectCreateIn,
+    ProjectDetailOut,
+    ProjectOut,
+    RemoteProbeOut,
+    UploadInitIn,
+    UploadInitOut,
+    UploadStatusOut,
+    UrlIngestIn,
+)
+from ...storage import get_storage
+from ..deps import current_workspace, get_scoped_project
+
+logger = get_logger(__name__)
+router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
+
+_CHUNK = 1024 * 1024
+
+
+def _validate_url(raw_url: str) -> str:
+    """Validate a user-supplied URL, mapping rejections to HTTP errors."""
+    settings = get_settings()
+    if not settings.url_ingestion_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="URL ingestion is disabled on this server",
+        )
+    try:
+        validated = validate_source_url(raw_url, allowed_hosts=settings.allowed_source_host_list)
+    except BlockedSourceUrl as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except SourceUrlError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    return validated.url
+
+
+def _attach_url_source(db: Session, project: Project, url: str) -> None:
+    """Mark ``project`` as URL-sourced with a placeholder media asset.
+
+    The asset path is left empty; the pipeline downloads the file during ingest
+    and fills it in. Every other stage only ever sees a local path.
+    """
+    project.source_kind = "url"
+    project.source_url = url
+    project.status = ProjectStatus.created
+    project.error = None
+
+    asset = db.scalar(select(MediaAsset).where(MediaAsset.project_id == project.id))
+    if asset is None:
+        db.add(MediaAsset(project_id=project.id, path=""))
+    else:
+        # The source is being replaced, so drop whatever the asset pointed at and
+        # leave the path empty. The ingest stage then re-downloads the new URL
+        # instead of silently reusing the old media.
+        if asset.path:
+            Path(asset.path).unlink(missing_ok=True)
+        asset.path = ""
+        asset.size_bytes = 0
+
+
+@router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
+def create_project(
+    payload: ProjectCreateIn,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> Project:
+    project = Project(
+        workspace_id=workspace.id,
+        title=payload.title,
+        source_kind="upload",
+        license_note=payload.license_note,
+        authorized_by=payload.authorized_by,
+    )
+    db.add(project)
+    db.flush()
+    if payload.source_url is not None:
+        url = _validate_url(str(payload.source_url))
+        _attach_url_source(db, project, url)
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@router.post("/source-url/probe", response_model=RemoteProbeOut)
+def probe_source_url(
+    payload: UrlIngestIn, workspace: Workspace = Depends(current_workspace)
+) -> RemoteProbeOut:
+    """Fetch metadata for a URL without downloading the video.
+
+    Lets a client show the title, uploader and duration, and confirm the link is
+    supported, before committing to a download.
+    """
+    url = _validate_url(str(payload.source_url))
+    downloader = get_downloader()
+    try:
+        info = downloader.probe(url)
+    except DownloadError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    return RemoteProbeOut(
+        url=url,
+        title=info.title,
+        uploader=info.uploader,
+        duration_seconds=info.duration_seconds,
+        thumbnail=info.thumbnail,
+        extractor=info.extractor,
+        webpage_url=info.webpage_url,
+        downloader=downloader.name,
+    )
+
+
+@router.get("", response_model=list[ProjectOut])
+def list_projects(
+    db: Session = Depends(get_db), workspace: Workspace = Depends(current_workspace)
+) -> list[Project]:
+    return list(
+        db.scalars(
+            select(Project)
+            .where(Project.workspace_id == workspace.id)
+            .order_by(Project.created_at.desc())
+        )
+    )
+
+
+@router.get("/{project_id}", response_model=ProjectDetailOut)
+def get_project(
+    project_id: str,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> Project:
+    return get_scoped_project(db, project_id, workspace.id)
+
+
+@router.post("/{project_id}/upload", response_model=ProjectDetailOut)
+def upload_video(
+    project_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> Project:
+    settings = get_settings()
+    project = get_scoped_project(db, project_id, workspace.id)
+
+    destination = settings.uploads_dir / f"{project.id}{_safe_suffix(file.filename)}"
+    size = 0
+    try:
+        with destination.open("wb") as handle:
+            while chunk := file.file.read(_CHUNK):
+                size += len(chunk)
+                if size > settings.max_upload_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=f"upload exceeds {settings.max_upload_mb} MB limit",
+                    )
+                handle.write(chunk)
+    except HTTPException:
+        destination.unlink(missing_ok=True)
+        raise
+
+    asset = db.scalar(select(MediaAsset).where(MediaAsset.project_id == project.id))
+    if asset is None:
+        asset = MediaAsset(project_id=project.id)
+        db.add(asset)
+    asset.path = str(destination)
+    asset.size_bytes = size
+    project.source_kind = "upload"
+    project.status = ProjectStatus.created
+    project.error = None
+    _backup_source(asset, destination)
+    db.commit()
+    logger.info("upload.stored", project_id=project.id, bytes=size)
+    return project
+
+
+def _backup_source(asset: MediaAsset, path: Path) -> None:
+    """Keep a durable copy of the upload so a restart cannot orphan the project.
+
+    The uploaded file is the one artefact that cannot be regenerated: lose it and
+    every clip derived from it is unrenderable, which is exactly what a container
+    restart on a host without a volume does. Recording the key lets ``ingest``
+    fetch the source back instead of failing with a missing-file error.
+    """
+    storage = get_storage()
+    if not storage.is_remote:
+        return
+    key = f"sources/{asset.project_id}{path.suffix}"
+    try:
+        storage.put(path, key)
+    except Exception as exc:  # noqa: BLE001 - the local copy still works today
+        logger.error("upload.backup_failed", project_id=asset.project_id, error=str(exc))
+        return
+    asset.source_key = key
+
+
+def settings_uploads_path(project_id: str, filename: str | None) -> Path:
+    """Final location for a project's uploaded media."""
+    settings = get_settings()
+    return settings.uploads_dir / f"{project_id}{_safe_suffix(filename)}"
+
+
+def _upload_part_path(project_id: str, upload_id: str) -> Path:
+    """Where a chunked upload accumulates before it becomes the media asset."""
+    settings = get_settings()
+    safe_id = "".join(ch for ch in upload_id if ch.isalnum() or ch in "-_")
+    if not safe_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid upload id"
+        )
+    return settings.upload_parts_dir / f"{project_id}-{safe_id}.part"
+
+
+def _upload_meta_path(project_id: str, upload_id: str) -> Path:
+    """Sidecar recording the declared size, so a resume can report progress."""
+    return _upload_part_path(project_id, upload_id).with_suffix(".json")
+
+
+def _read_upload_total(project_id: str, upload_id: str) -> int:
+    meta = _upload_meta_path(project_id, upload_id)
+    try:
+        return int(json.loads(meta.read_text())["total_bytes"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0
+
+
+@router.post("/{project_id}/upload/init", response_model=UploadInitOut)
+def init_chunked_upload(
+    project_id: str,
+    payload: UploadInitIn,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> UploadInitOut:
+    """Open a resumable upload and return the chunk size to use.
+
+    Hosting proxies cap the request body - Cloudflare answers anything over
+    100MiB with an HTML 413 that never reaches the app - so a long recording is
+    sent in pieces. The total size is declared here so an oversized file is
+    rejected before any bandwidth is spent.
+    """
+    settings = get_settings()
+    project = get_scoped_project(db, project_id, workspace.id)
+    if payload.total_bytes > settings.max_upload_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"upload exceeds {settings.max_upload_mb} MB limit",
+        )
+    upload_id = uuid.uuid4().hex
+    part = _upload_part_path(project.id, upload_id)
+    part.write_bytes(b"")
+    _upload_meta_path(project.id, upload_id).write_text(
+        json.dumps({"total_bytes": payload.total_bytes, "filename": payload.filename})
+    )
+    logger.info(
+        "upload.init", project_id=project.id, total_bytes=payload.total_bytes, upload_id=upload_id
+    )
+    return UploadInitOut(
+        upload_id=upload_id,
+        chunk_size=settings.upload_chunk_bytes,
+        received_bytes=0,
+    )
+
+
+@router.get("/{project_id}/upload/{upload_id}", response_model=UploadStatusOut)
+def chunked_upload_status(
+    project_id: str,
+    upload_id: str,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> UploadStatusOut:
+    """Report how much of an upload has arrived, so a client can resume."""
+    project = get_scoped_project(db, project_id, workspace.id)
+    part = _upload_part_path(project.id, upload_id)
+    if not part.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown upload")
+    received = part.stat().st_size
+    total = _read_upload_total(project.id, upload_id)
+    return UploadStatusOut(
+        upload_id=upload_id,
+        received_bytes=received,
+        total_bytes=total or received,
+        complete=bool(total) and received >= total,
+    )
+
+
+@router.post("/{project_id}/upload/{upload_id}/chunk", response_model=UploadStatusOut)
+def append_upload_chunk(
+    project_id: str,
+    upload_id: str,
+    offset: int = 0,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> UploadStatusOut:
+    """Append one chunk at ``offset``.
+
+    ``offset`` makes retries safe: a chunk that the client believes failed but
+    the server actually stored is overwritten rather than appended twice, which
+    would silently corrupt the file.
+    """
+    settings = get_settings()
+    project = get_scoped_project(db, project_id, workspace.id)
+    part = _upload_part_path(project.id, upload_id)
+    if not part.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown upload")
+
+    current = part.stat().st_size
+    if offset > current:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"offset {offset} is past the {current} bytes already received",
+        )
+
+    with part.open("r+b") as handle:
+        handle.seek(offset)
+        handle.truncate()
+        while chunk := file.file.read(_CHUNK):
+            handle.write(chunk)
+    received = part.stat().st_size
+    if received > settings.max_upload_bytes:
+        part.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"upload exceeds {settings.max_upload_mb} MB limit",
+        )
+    total = _read_upload_total(project.id, upload_id)
+    return UploadStatusOut(
+        upload_id=upload_id,
+        received_bytes=received,
+        total_bytes=total or received,
+        complete=bool(total) and received >= total,
+    )
+
+
+@router.post("/{project_id}/upload/{upload_id}/complete", response_model=ProjectDetailOut)
+def complete_chunked_upload(
+    project_id: str,
+    upload_id: str,
+    payload: UploadInitIn,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> Project:
+    """Promote the assembled parts to the project's media asset."""
+    project = get_scoped_project(db, project_id, workspace.id)
+    part = _upload_part_path(project.id, upload_id)
+    if not part.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown upload")
+
+    size = part.stat().st_size
+    if size == 0:
+        part.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="upload is empty"
+        )
+
+    destination = settings_uploads_path(project.id, payload.filename)
+    shutil.move(str(part), destination)
+    _upload_meta_path(project.id, upload_id).unlink(missing_ok=True)
+
+    asset = db.scalar(select(MediaAsset).where(MediaAsset.project_id == project.id))
+    if asset is None:
+        asset = MediaAsset(project_id=project.id)
+        db.add(asset)
+    asset.path = str(destination)
+    asset.size_bytes = size
+    project.source_kind = "upload"
+    project.status = ProjectStatus.created
+    project.error = None
+    db.commit()
+    logger.info("upload.completed", project_id=project.id, bytes=size)
+    return project
+
+
+@router.post("/{project_id}/source-url", response_model=ProjectDetailOut)
+def set_project_source_url(
+    project_id: str,
+    payload: UrlIngestIn,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> Project:
+    """Attach a remote video URL to an existing project.
+
+    Mirrors ``/upload``: the file is fetched when the project is processed.
+    """
+    project = get_scoped_project(db, project_id, workspace.id)
+
+    url = _validate_url(str(payload.source_url))
+    _attach_url_source(db, project, url)
+    if payload.title:
+        project.title = payload.title
+    db.commit()
+    db.refresh(project)
+    logger.info("project.source_url_set", project_id=project.id, host=url.split("/")[2])
+    return project
+
+
+def _process_in_background(project_id: str) -> None:
+    def work() -> None:
+        try:
+            with session_scope() as session:
+                Pipeline(session).run(project_id)
+        except Exception as exc:  # noqa: BLE001 - the project records the failure
+            logger.error("process.background_failed", project_id=project_id, error=str(exc))
+
+    threading.Thread(target=work, name=f"process-{project_id}", daemon=True).start()
+
+
+@router.post("/{project_id}/process", response_model=ProjectOut, status_code=202)
+def process_project(
+    project_id: str,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> Project:
+    project = get_scoped_project(db, project_id, workspace.id)
+    if project.media is None:
+        raise HTTPException(
+            status_code=400,
+            detail="provide a source first: upload a file or set a source URL",
+        )
+    if project.source_kind == "url" and not project.source_url:
+        raise HTTPException(status_code=400, detail="project has no source URL to download")
+
+    settings = get_settings()
+    if not settings.task_always_eager:
+        enqueue_project(project.id)
+        db.refresh(project)
+        return project
+
+    if settings.process_in_background:
+        # Transcribing a long video takes far longer than a hosting proxy's
+        # request timeout, and the proxy answers 502 while the pipeline keeps
+        # running - the caller sees a failure for work that succeeds. Run it in
+        # a thread and let the client poll project status. The thread opens its
+        # own session because a SQLAlchemy session is not thread-safe and this
+        # request's session closes when the response is sent.
+        project.status = ProjectStatus.ingesting
+        db.commit()
+        _process_in_background(project.id)
+        db.refresh(project)
+        return project
+
+    # Run inline so local development needs no broker.
+    try:
+        Pipeline(db).run(project.id)
+    except PipelineError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.refresh(project)
+    return project
+
+
+@router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_project(
+    project_id: str,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(current_workspace),
+) -> None:
+    project = get_scoped_project(db, project_id, workspace.id)
+    if project.media is not None and project.media.path:
+        Path(project.media.path).unlink(missing_ok=True)
+    for clip in project.clips:
+        if clip.render_path:
+            Path(clip.render_path).unlink(missing_ok=True)
+    db.delete(project)
+    db.commit()
+
+
+def _safe_suffix(filename: str | None) -> str:
+    """Only allow a known-safe extension; never trust the client filename."""
+    allowed = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
+    suffix = Path(filename or "").suffix.lower()
+    return suffix if suffix in allowed else ".mp4"
+
+
+def copy_local_source(source: str, project_id: str) -> str:
+    """Copy an already-authorized local file into the uploads directory."""
+    settings = get_settings()
+    src = Path(source)
+    if not src.exists():
+        raise FileNotFoundError(source)
+    destination = settings.uploads_dir / f"{project_id}{src.suffix.lower()}"
+    shutil.copy2(src, destination)
+    return str(destination)

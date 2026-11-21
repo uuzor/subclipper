@@ -1,0 +1,404 @@
+.pj {
+  padding-top: var(--s7);
+}
+
+.pj-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s5);
+  justify-content: space-between;
+  align-items: flex-end;
+  padding-bottom: var(--s5);
+  border-bottom: 1px solid var(--rule);
+}
+
+.pj-title {
+  font-size: clamp(1.7rem, 3.4vw, 2.6rem);
+  max-width: 26ch;
+  overflow-wrap: anywhere;
+}
+
+.pj-meta {
+  margin-top: var(--s2);
+  font-size: 12.5px;
+  color: var(--ink-faint);
+  overflow-wrap: anywhere;
+}
+
+.pj-head-right {
+  display: flex;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+.pj-chip {
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  background: var(--paper-sunken);
+  color: var(--ink-soft);
+}
+
+.pj-chip-ok {
+  background: var(--cobalt);
+  color: #fff;
+}
+
+.pj-chip-bad {
+  background: var(--crimson);
+  color: #fff;
+}
+
+.pj-chip-live {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.pj-h1 {
+  font-size: 2.2rem;
+}
+
+.pj-h2 {
+  font-size: clamp(1.4rem, 2.6vw, 2rem);
+}
+
+.pj-sub {
+  margin-top: var(--s3);
+  color: var(--ink-soft);
+}
+
+.pj-empty,
+.pj-loading {
+  display: grid;
+  gap: var(--s4);
+  justify-items: start;
+  padding-top: var(--s9);
+}
+
+.pj-loading {
+  grid-auto-flow: column;
+  justify-content: start;
+  align-items: center;
+  color: var(--ink-faint);
+  font-size: 13px;
+}
+
+/* ---- stages ---- */
+.stages {
+  display: grid;
+  gap: 1px;
+  margin-top: var(--s6);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--rule);
+}
+
+.stage {
+  display: grid;
+  grid-template-columns: 40px 1fr;
+  gap: var(--s4);
+  align-items: center;
+  padding: var(--s4) var(--s5);
+  background: var(--paper-raised);
+}
+
+.stage-body strong {
+  display: block;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 16px;
+  letter-spacing: -0.015em;
+}
+
+.stage-body em {
+  font-style: normal;
+  font-size: 14px;
+  color: var(--ink-faint);
+}
+
+.stage-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--paper-sunken);
+  color: var(--ink-faint);
+}
+
+.stage.is-done .stage-mark {
+  background: var(--cobalt);
+  color: #fff;
+}
+
+.stage.is-active .stage-mark {
+  background: var(--cobalt-wash);
+  color: var(--cobalt);
+}
+
+.stage.is-todo .stage-body strong {
+  color: var(--ink-faint);
+}
+
+.stage-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* ---- failed ---- */
+.failed {
+  display: flex;
+  gap: var(--s4);
+  align-items: flex-start;
+  flex-wrap: wrap;
+  margin-top: var(--s6);
+  padding: var(--s5);
+  border: 1px solid var(--crimson);
+  border-radius: var(--r-lg);
+  background: var(--crimson-wash);
+}
+
+.failed svg {
+  flex: none;
+  color: var(--crimson);
+  margin-top: 2px;
+}
+
+.failed-h {
+  font-size: 19px;
+  margin-bottom: var(--s2);
+}
+
+.failed-p {
+  font-size: 15px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  max-width: 72ch;
+}
+
+.failed-hint {
+  margin-top: var(--s2);
+  font-size: 13.5px;
+  color: var(--ink-soft);
+}
+
+.failed .btn {
+  margin-left: auto;
+}
+
+/* ---- overview ---- */
+.pj-overview {
+  display: grid;
+  gap: var(--s4);
+  margin-top: var(--s6);
+}
+
+.pj-providers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s4);
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.pj-providers-cap {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.pj-provider strong {
+  color: var(--ink-soft);
+  font-weight: 600;
+}
+
+/* ---- clip list ---- */
+.clips-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s4);
+  justify-content: space-between;
+  align-items: center;
+  margin-top: var(--s8);
+  margin-bottom: var(--s5);
+}
+
+.clips-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+}
+
+.clips-err {
+  font-size: 13.5px;
+  color: var(--crimson);
+}
+
+.clips-platform {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: 13.5px;
+  color: var(--ink-3);
+}
+
+.clips-platform select {
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 13.5px;
+  cursor: pointer;
+}
+
+.clips-platform select:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.clips {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s5);
+  align-items: start;
+}
+
+.clip {
+  display: grid;
+  gap: var(--s4);
+  padding: var(--s5);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-lg);
+  background: var(--paper-raised);
+  transition: border-color 200ms var(--ease-out), box-shadow 200ms var(--ease-out);
+}
+
+.clip.is-active {
+  border-color: var(--cobalt);
+  box-shadow: 0 0 0 3px var(--cobalt-wash);
+}
+
+.clip-top {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex-wrap: wrap;
+}
+
+.clip-rank {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--cobalt);
+}
+
+.clip-type {
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--crimson-wash);
+  color: var(--crimson);
+}
+
+.clip-range {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.clip-title {
+  font-size: 22px;
+  letter-spacing: -0.025em;
+}
+
+.clip-hook {
+  font-size: 15.5px;
+  color: var(--ink-soft);
+  margin-top: calc(-1 * var(--s2));
+}
+
+.clip-excerpt {
+  font-size: 16px;
+  line-height: 1.55;
+  padding-left: var(--s4);
+  border-left: 2px solid var(--cobalt);
+  color: var(--ink);
+}
+
+.clip-rationale {
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+
+.clip-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s4);
+  padding-top: var(--s4);
+  border-top: 1px solid var(--rule);
+}
+
+.clip-dur {
+  font-size: 13px;
+  color: var(--ink-faint);
+}
+
+/* The rendered clip itself. Both max-* limits apply, so a 9:16 frame shrinks
+   to fit the height cap and a landscape frame to the card width, with the
+   intrinsic aspect ratio preserved either way. */
+.clip-video {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 520px;
+  margin: var(--s3) auto var(--s4);
+  border-radius: 10px;
+  background: #000;
+}
+
+.clip-video-pending {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 9 / 16;
+  max-height: 260px;
+  border: 1px dashed var(--line);
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.clip-render-note {
+  font-size: 11.5px;
+  color: var(--ink-faint);
+}
+
+/* Long enough to wrap several lines: an ffmpeg message names the file and the
+   reason, and truncating it to one line hides the part that matters. */
+.clip-render-error {
+  margin: var(--s2) 0 0;
+  padding: 8px 10px;
+  border-left: 2px solid #d9534f;
+  border-radius: 0 6px 6px 0;
+  background: rgba(217, 83, 79, 0.08);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #f0a6a4;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .clips {
+    grid-template-columns: 1fr;
+  }
+}
+
+.clip-excerpt-sole {
+  font-size: 17px;
+  color: var(--ink);
+}
