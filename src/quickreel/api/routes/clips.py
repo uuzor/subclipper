@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -18,6 +18,7 @@ from ...pipeline.tasks import enqueue_render
 from ...rendering import platforms
 from ...rendering.renderer import render_clip, render_clip_by_id
 from ...schemas import ClipOut, RenderRequest
+from ...storage import get_storage
 from ..deps import current_workspace, get_scoped_project
 
 logger = get_logger(__name__)
@@ -219,20 +220,42 @@ def list_export_platforms() -> list[dict]:
     ]
 
 
+def _storage_key(clip: Clip) -> str | None:
+    """The object-storage key recorded when the render was uploaded."""
+    meta = clip.render_meta or {}
+    key = meta.get("storage_key")
+    return key if isinstance(key, str) and key else None
+
+
+def _local_render_path(clip: Clip) -> Path | None:
+    """The rendered MP4 on this container, if it is still there."""
+    if not clip.render_path:
+        return None
+    path = Path(clip.render_path)
+    return path if path.is_file() else None
+
+
 @router.get("/clips/{clip_id}/download")
 def download_clip(
     clip_id: str,
     db: Session = Depends(get_db),
     workspace: Workspace = Depends(current_workspace),
-) -> FileResponse:
+):
     clip = _scoped_clip(db, clip_id, workspace.id)
-    if not clip.render_path or not Path(clip.render_path).exists():
-        raise HTTPException(status_code=409, detail="clip has not been rendered yet")
-    return FileResponse(
-        clip.render_path,
-        media_type="video/mp4",
-        filename=f"quickreel-{clip.id}.mp4",
-    )
+    path = _local_render_path(clip)
+    if path is not None:
+        return FileResponse(
+            path,
+            media_type="video/mp4",
+            filename=f"quickreel-{clip.id}.mp4",
+        )
+    key = _storage_key(clip)
+    if key:
+        try:
+            return RedirectResponse(get_storage().url_for(key), status_code=307)
+        except Exception as exc:  # noqa: BLE001 - presign can fail on bad creds
+            logger.error("clip.presign_failed", clip_id=clip.id, error=str(exc))
+    raise HTTPException(status_code=409, detail="clip has not been rendered yet")
 
 
 @router.get("/clips/{clip_id}/video")
@@ -240,17 +263,29 @@ def stream_clip(
     clip_id: str,
     db: Session = Depends(get_db),
     workspace: Workspace = Depends(current_workspace),
-) -> FileResponse:
+):
     """Same bytes as the download, served inline so a <video> tag can play it.
 
-    FileResponse sends ``Accept-Ranges`` and honours Range headers, which
-    Safari requires before it will play any video at all.
+    A local file is served with ``FileResponse``, which sends ``Accept-Ranges``
+    and honours Range headers - Safari requires both before it will play any
+    video at all. When the container has been restarted on ephemeral storage the
+    local file is gone; the copy in object storage is then reachable through a
+    short-lived presigned URL, so redirect rather than proxying the bytes twice.
     """
     clip = _scoped_clip(db, clip_id, workspace.id)
-    if not clip.render_path or not Path(clip.render_path).exists():
-        raise HTTPException(status_code=409, detail="clip has not been rendered yet")
-    return FileResponse(
-        clip.render_path,
-        media_type="video/mp4",
-        headers={"Content-Disposition": "inline"},
-    )
+    path = _local_render_path(clip)
+    if path is not None:
+        return FileResponse(
+            path,
+            media_type="video/mp4",
+            headers={"Content-Disposition": "inline"},
+        )
+
+    key = _storage_key(clip)
+    if key:
+        try:
+            return RedirectResponse(get_storage().url_for(key), status_code=307)
+        except Exception as exc:  # noqa: BLE001 - presign can fail on bad creds
+            logger.error("clip.presign_failed", clip_id=clip.id, error=str(exc))
+
+    raise HTTPException(status_code=409, detail="clip has not been rendered yet")

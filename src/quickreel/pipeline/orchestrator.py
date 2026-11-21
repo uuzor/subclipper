@@ -85,7 +85,19 @@ class Pipeline:
             # Record what actually served each stage so a degraded run is
             # auditable even though it succeeded.
             project.providers = provenance
+            # Moments are only rows until ffmpeg turns them into MP4s, and a
+            # candidate row renders as an empty player. Claim the top moments
+            # before the project turns ready: the client stops polling once a
+            # project is ready with nothing rendering, so a clip left as a
+            # candidate here would never be picked up by the open page.
+            pending = (
+                self._claim_for_auto_render(project)
+                if self.settings.auto_render_after_process
+                else []
+            )
             self._set_status(project, ProjectStatus.ready)
+            for clip in pending:
+                self._render_one(clip)
         except Exception as exc:  # noqa: BLE001 - recorded on the project row
             logger.error("pipeline.failed", project_id=project_id, stage=stage, error=str(exc))
             project.error = str(exc)
@@ -299,6 +311,39 @@ class Pipeline:
         return clips
 
     # -- helpers -----------------------------------------------------------
+
+    def _claim_for_auto_render(self, project: Project) -> list[Clip]:
+        """Mark the top moments as rendering so the client keeps polling."""
+        clips = list(
+            self.session.scalars(
+                select(Clip)
+                .where(Clip.project_id == project.id, Clip.status == ClipStatus.candidate)
+                .order_by(Clip.rank)
+                .limit(self.settings.auto_render_max_clips)
+            )
+        )
+        for clip in clips:
+            clip.status = ClipStatus.rendering
+        self.session.commit()
+        return clips
+
+    def _render_one(self, clip: Clip) -> None:
+        """Render a claimed clip. A failure leaves it retryable, not fatal.
+
+        The project is already ``ready`` by now, so a render problem must not
+        demote the analysis: the clip records its own failure and the client can
+        still ask for a render.
+        """
+        from ..rendering.renderer import render_clip
+
+        try:
+            render_clip(
+                self.session,
+                clip,
+                platform=self.settings.auto_render_platform or None,
+            )
+        except Exception as exc:  # noqa: BLE001 - recorded per clip
+            logger.error("pipeline.auto_render_failed", clip_id=clip.id, error=str(exc))
 
     def _set_status(self, project: Project, status: ProjectStatus) -> None:
         project.status = status

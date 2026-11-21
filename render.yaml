@@ -2,20 +2,10 @@
 #
 # Deploy with: Render Dashboard -> New -> Blueprint -> pick this repo.
 #
-# One web service and one database. The service is a single container on
-# purpose: uploads and renders live on a persistent disk, and a disk can only be
-# mounted by one service. Splitting the Celery worker out needs shared object
-# storage first, so that is the scale-up step, not the starting point.
-
-databases:
-  - name: quickreel-db
-    databaseName: quickreel
-    user: quickreel
-    # The free tier is deleted after 90 days: fine for a trial, wrong for a
-    # product that keeps its data.
-    plan: basic-256mb
-    postgresMajorVersion: "16"
-    ipAllowList: []
+# One web service, no managed database. The app keeps its data in SQLite on the
+# mounted disk, and rendered MP4s go to object storage so they survive a restart.
+# The service is a single container on purpose: the disk can only be mounted by
+# one service, so splitting the Celery worker out is the scale-up step.
 
 services:
   - type: web
@@ -33,10 +23,10 @@ services:
       # than fail later at the first publish.
       - key: QUICKREEL_ENV
         value: production
+      # SQLite on the mounted disk. One container owns the file, so there is no
+      # second writer to contend with.
       - key: QUICKREEL_DATABASE_URL
-        fromDatabase:
-          name: quickreel-db
-          property: connectionString
+        value: sqlite+pysqlite:////var/data/quickreel.db
       # Must be the verified public origin: it is the OAuth redirect base and
       # decides whether session cookies are marked Secure.
       - key: QUICKREEL_PUBLIC_BASE_URL
@@ -97,6 +87,21 @@ services:
       - key: QUICKREEL_LLM_BASE_URL
         sync: false
       - key: QUICKREEL_LLM_MODEL
+        sync: false
+      # Rendered clips are written here as well as to the disk. The disk is
+      # wiped when the service is replaced, which would otherwise leave rows
+      # saying "rendered" with no file to play.
+      - key: QUICKREEL_STORAGE_BACKEND
+        value: s3
+      - key: QUICKREEL_S3_BUCKET
+        sync: false
+      - key: QUICKREEL_S3_ENDPOINT_URL
+        sync: false
+      - key: QUICKREEL_S3_REGION
+        sync: false
+      - key: QUICKREEL_S3_ACCESS_KEY_ID
+        sync: false
+      - key: QUICKREEL_S3_SECRET_ACCESS_KEY
         sync: false
     disk:
       name: quickreel-data

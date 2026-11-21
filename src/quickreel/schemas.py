@@ -92,7 +92,13 @@ class ClipOut(BaseModel):
 
     @model_validator(mode="after")
     def _mark_render_available(self) -> ClipOut:
-        self.render_available = bool(self.render_path) and Path(self.render_path).is_file()
+        # A clip whose bytes were uploaded to object storage stays playable
+        # after a container restart, which is exactly when the local file is
+        # gone. Checking the bucket per clip would add a network round-trip to
+        # every poll, so trust the key recorded at upload time instead.
+        self.render_available = bool(self.render_path) and (
+            Path(self.render_path).is_file() or bool(self.render_meta.get("storage_key"))
+        )
         return self
 
     @model_validator(mode="after")

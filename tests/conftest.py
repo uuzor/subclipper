@@ -33,6 +33,13 @@ _TEST_ENV = {
     "QUICKREEL_TASK_ALWAYS_EAGER": "true",
     "QUICKREEL_PUBLISHING_MODE": "mock",
     "QUICKREEL_FRONTEND_DIR": "",
+    # Pinned so a developer's .env cannot point the suite at a real bucket or
+    # make requests run in the background. Environment variables outrank the
+    # .env file, so these win.
+    "QUICKREEL_STORAGE_BACKEND": "local",
+    "QUICKREEL_PROCESS_IN_BACKGROUND": "false",
+    "QUICKREEL_RENDER_IN_BACKGROUND": "false",
+    "QUICKREEL_AUTO_RENDER_AFTER_PROCESS": "true",
 }
 os.environ.update(_TEST_ENV)
 
@@ -59,6 +66,27 @@ def settings():
     from quickreel.config import get_settings
 
     return get_settings()
+
+
+@pytest.fixture()
+def no_auto_render(monkeypatch):
+    """Leave detected moments unrendered.
+
+    The pipeline renders the top moments so a finished project is playable. A
+    test about the unrendered path has to switch that off rather than rely on
+    the old behaviour where nothing was ever rendered.
+
+    Patched at the pipeline's own ``get_settings`` reference. Mutating the
+    cached settings object is unreliable here: other tests call
+    ``get_settings.cache_clear()``, after which the pipeline reads a different
+    instance than the one this fixture was handed.
+    """
+    from quickreel.config import get_settings
+    from quickreel.pipeline import orchestrator
+
+    off = get_settings().model_copy(update={"auto_render_after_process": False})
+    monkeypatch.setattr(orchestrator, "get_settings", lambda: off)
+    yield off
 
 
 @pytest.fixture()

@@ -15,6 +15,7 @@ from ..config import get_settings
 from ..logging_setup import get_logger
 from ..media import ffmpeg
 from ..models import Clip, ClipStatus, Project
+from ..storage import get_storage
 from . import platforms
 
 logger = get_logger(__name__)
@@ -118,6 +119,22 @@ def render_clip(
 
     clip.render_path = str(output)
     clip.status = ClipStatus.rendered
+    storage_key = None
+    storage = get_storage()
+    if storage.is_remote:
+        # Only a remote copy outlives the container, so only that is worth
+        # recording as a fallback. Uploading on a local backend would just
+        # duplicate the file next to itself and make a deleted MP4 still read
+        # as playable. The key (not the returned URI) is stored because that is
+        # what every read path - url_for, get, exists - takes.
+        key = f"renders/{output.name}"
+        try:
+            storage.put(output, key)
+            storage_key = key
+        except Exception as exc:  # noqa: BLE001 - local file is still usable
+            # A failed upload must not fail a render that produced a playable
+            # file: the local copy still serves until the next restart.
+            logger.error("render.upload_failed", clip_id=clip.id, error=str(exc))
     clip.render_meta = {
         "platform": spec.key,
         "orientation": "vertical" if spec.height > spec.width else "horizontal",
@@ -126,6 +143,7 @@ def render_clip(
         "captions_burned": burn_captions,
         "subtitle_path": str(subtitle_path) if subtitle_path else None,
         "size_bytes": output.stat().st_size if output.exists() else 0,
+        "storage_key": storage_key,
     }
     session.commit()
     logger.info("render.done", clip_id=clip.id, platform=spec.key, path=str(output))

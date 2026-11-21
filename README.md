@@ -257,9 +257,13 @@ All settings are environment variables prefixed with `QUICKREEL_`. See
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `QUICKREEL_DATABASE_URL` | SQLite file | PostgreSQL in production, e.g. `postgresql+psycopg://...` |
+| `QUICKREEL_DATABASE_URL` | SQLite file | Postgres for a host without a volume; `postgres://` is rewritten to psycopg 3 |
 | `QUICKREEL_REDIS_URL` | empty | Empty means eager in-process tasks |
 | `QUICKREEL_TASK_ALWAYS_EAGER` | `true` | Set `false` with Redis for async workers |
+| `QUICKREEL_STORAGE_BACKEND` | `local` | `s3` keeps renders on object storage, so they survive a restart |
+| `QUICKREEL_S3_BUCKET` | empty | Required when the backend is `s3`; also read as plain `S3_BUCKET` |
+| `QUICKREEL_AUTO_RENDER_AFTER_PROCESS` | `true` | Render the top moments as soon as analysis finishes |
+| `QUICKREEL_AUTO_RENDER_MAX_CLIPS` | `3` | How many moments to render automatically |
 | `QUICKREEL_TRANSCRIPTION_PROVIDER` | `auto` | `auto`, `faster-whisper`, `fake` |
 | `QUICKREEL_VISION_PROVIDER` | `auto` | `auto`, `gemini`, `fake` |
 | `QUICKREEL_MOMENT_PROVIDER` | `auto` | `auto`, `llm`, `fake` |

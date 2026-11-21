@@ -92,9 +92,17 @@ docker run -p 8000:8000 \
   quickreel
 ```
 
-A `postgres://` or plain `postgresql://` URL is accepted: it is rewritten to the
-`psycopg` driver this project installs, so a provider's connection string works
-unmodified.
+The database defaults to SQLite, which is only durable when a volume is
+mounted at `QUICKREEL_DATA_DIR`. A host without a volume loses every row on
+redeploy, so point `QUICKREEL_DATABASE_URL` at Postgres there. A `postgres://`
+or `postgresql://` URL is accepted and rewritten to the psycopg 3 driver the
+project installs, so a provider's connection string works unmodified.
+
+Rendered clips are also uploaded to S3-compatible storage when
+`QUICKREEL_STORAGE_BACKEND=s3`. The container's filesystem is ephemeral, so
+without it a restart keeps the database row and loses the MP4, leaving clips
+marked `rendered` with nothing to play. Set the bucket and credentials, and the
+download and stream endpoints hand back presigned URLs instead of local files.
 
 ## Verifying a deployment
 

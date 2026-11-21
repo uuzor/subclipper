@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,6 +45,41 @@ class Settings(BaseSettings):
     # transcript plus moment detection on a long video dwarfs any request
     # timeout. Off by default for the same reason as render_in_background.
     process_in_background: bool = False
+
+    # Render the top moments as soon as analysis finishes. Without this a
+    # finished project is a list of candidate rows with no playable video, which
+    # reads as a broken product rather than an unrendered one.
+    auto_render_after_process: bool = True
+    auto_render_max_clips: int = 3
+    # Empty means the default platform (9:16 vertical).
+    auto_render_platform: str = ""
+
+    # Object storage for source videos and rendered clips. ``local`` keeps
+    # everything under ``data_dir``, which does not survive a container
+    # restart on hosts with an ephemeral filesystem: the database row says
+    # "rendered" while the MP4 is gone. ``s3`` keeps the bytes outside the
+    # container so a restart costs nothing.
+    storage_backend: str = "local"
+    # A provisioner writes these as plain ``S3_*``, which is also the name every
+    # S3 client expects, so both spellings are accepted and re-provisioning does
+    # not quietly stop configuring the app.
+    s3_bucket: str = Field("", validation_alias=AliasChoices("QUICKREEL_S3_BUCKET", "S3_BUCKET"))
+    s3_endpoint_url: str = Field(
+        "", validation_alias=AliasChoices("QUICKREEL_S3_ENDPOINT_URL", "S3_ENDPOINT")
+    )
+    s3_region: str = Field(
+        "us-east-1", validation_alias=AliasChoices("QUICKREEL_S3_REGION", "S3_REGION")
+    )
+    s3_access_key_id: str = Field(
+        "", validation_alias=AliasChoices("QUICKREEL_S3_ACCESS_KEY_ID", "S3_ACCESS_KEY_ID")
+    )
+    s3_secret_access_key: str = Field(
+        "",
+        validation_alias=AliasChoices("QUICKREEL_S3_SECRET_ACCESS_KEY", "S3_SECRET_ACCESS_KEY"),
+    )
+    # Presigned playback URLs are handed to a <video> tag, so they have to
+    # outlive a viewing session without being long-lived credentials.
+    s3_presign_seconds: int = 3600
 
     # Provider selection
     transcription_provider: str = "auto"
@@ -249,8 +284,8 @@ class Settings(BaseSettings):
     def _pin_the_installed_postgres_driver(cls, value: str) -> str:
         """Force the Postgres driver that is actually installed.
 
-        Hosting providers hand out ``postgres://`` (Render, Heroku) or plain
-        ``postgresql://``. SQLAlchemy resolves both to psycopg2, which this
+        Hosting providers hand out ``postgres://`` (Render, Heroku, Neon) or
+        plain ``postgresql://``. SQLAlchemy resolves both to psycopg2, which this
         project does not depend on, so an unmodified provider URL fails at the
         first connection with a missing-module error. psycopg 3 is the declared
         dependency, so pin it here rather than asking operators to rewrite the
@@ -329,6 +364,14 @@ class Settings(BaseSettings):
                 "QUICKREEL_PUBLIC_BASE_URL must be an https:// origin in production; "
                 "session cookies are marked Secure from it, and over plain HTTP the "
                 "session cookie would travel in the clear"
+            )
+        # A container's filesystem is wiped on every deploy, so local storage in
+        # production means clips that render and then disappear. Caught here
+        # rather than at the first render, where it looks like a rendering bug.
+        if self.storage_backend.strip().lower() == "s3" and not self.s3_bucket.strip():
+            problems.append(
+                "QUICKREEL_STORAGE_BACKEND=s3 requires QUICKREEL_S3_BUCKET; without a "
+                "bucket, renders would only exist on the container's ephemeral disk"
             )
         if problems:
             raise ValueError("unsafe production configuration: " + "; ".join(problems))

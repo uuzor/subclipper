@@ -71,7 +71,7 @@ def test_create_target_does_not_echo_credentials(auth_client):
     assert "credentials" not in response.json()
 
 
-def test_schedule_rejects_unrendered_clip(auth_client, sample_video):
+def test_schedule_rejects_unrendered_clip(auth_client, sample_video, no_auto_render):
     created = auth_client.post("/api/v1/projects", json={"title": "P"})
     project_id = created.json()["id"]
     with sample_video.open("rb") as handle:

@@ -90,7 +90,7 @@ def test_render_and_download_top_clip(auth_client, sample_video):
     assert len(download.content) > 0
 
 
-def test_download_before_render_returns_conflict(auth_client, sample_video):
+def test_download_before_render_returns_conflict(auth_client, sample_video, no_auto_render):
     project = _create_and_upload(auth_client, sample_video)
     project_id = project["id"]
     assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
@@ -131,7 +131,7 @@ def test_stream_clip_serves_inline_playable_video(auth_client, sample_video):
     assert partial.content == video.content[:100]
 
 
-def test_stream_clip_before_render_returns_conflict(auth_client, sample_video):
+def test_stream_clip_before_render_returns_conflict(auth_client, sample_video, no_auto_render):
     project = _create_and_upload(auth_client, sample_video)
     project_id = project["id"]
     assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
@@ -316,7 +316,8 @@ def test_process_hands_off_to_a_thread_when_no_worker_exists(
     deadline = time.time() + 120
     while time.time() < deadline:
         detail = auth_client.get(f"/api/v1/projects/{project_id}").json()
-        if detail["status"] in {"ready", "analyze_failed", "transcribe_failed"}:
+        settled = all(c["status"] != "rendering" for c in detail["clips"])
+        if detail["status"] in {"ready", "analyze_failed", "transcribe_failed"} and settled:
             break
         time.sleep(0.5)
 
@@ -574,3 +575,86 @@ def test_export_platforms_lists_the_available_targets(auth_client):
     assert {"tiktok", "youtube_shorts", "instagram_reels", "youtube"} <= set(platforms)
     assert platforms["tiktok"]["aspect"] == "1080x1920"
     assert platforms["youtube"]["aspect"] == "1920x1080"
+
+
+def test_process_renders_the_top_moments_without_being_asked(auth_client, sample_video):
+    """Analysis alone must not leave a screen of "not rendered" cards.
+
+    Moments start life as candidate rows, and a candidate renders as an empty
+    player. The pipeline is expected to turn the best few into playable clips so
+    a finished project has something to watch.
+    """
+    project = _create_and_upload(auth_client, sample_video)
+    project_id = project["id"]
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+
+    clips = auth_client.get(f"/api/v1/projects/{project_id}/clips").json()
+    assert clips, "pipeline should produce clips"
+    rendered = [c for c in clips if c["status"] == "rendered"]
+    assert rendered, "the top moments should be rendered automatically"
+    for clip in rendered:
+        assert clip["render_available"] is True
+        assert Path(clip["render_path"]).is_file()
+
+
+def test_a_remote_render_stays_playable_when_the_local_file_is_gone(
+    auth_client, sample_video, monkeypatch
+):
+    """A clip uploaded to object storage must survive the local file vanishing.
+
+    This is the restart case: the row says rendered, the MP4 on the container is
+    gone, and the copy in the bucket is the only thing left. The clip has to
+    still read as playable, and the video endpoint has to hand back a URL for it
+    instead of a 409.
+    """
+    from quickreel import storage as storage_module
+
+    calls: list[tuple[str, str]] = []
+
+    class _FakeRemoteStorage(storage_module.Storage):
+        is_remote = True
+
+        def put(self, local_path, key):
+            calls.append(("put", key))
+            return f"s3://bucket/{key}"
+
+        def get(self, key, local_path):
+            raise AssertionError("playback should not download through the app")
+
+        def url_for(self, key):
+            calls.append(("url", key))
+            return f"https://bucket.example/{key}?sig=abc"
+
+        def exists(self, key):
+            return True
+
+        def delete(self, key):
+            pass
+
+    fake = _FakeRemoteStorage()
+    # ``renderer`` and the clips route import ``get_storage`` by value, so the
+    # module attribute alone would not reach them.
+    from quickreel.api.routes import clips as clips_route
+    from quickreel.rendering import renderer as renderer_module
+
+    for target in (storage_module, renderer_module, clips_route):
+        monkeypatch.setattr(target, "get_storage", lambda: fake)
+
+    project = _create_and_upload(auth_client, sample_video)
+    project_id = project["id"]
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+
+    clip = auth_client.get(f"/api/v1/projects/{project_id}/clips").json()[0]
+    assert clip["status"] == "rendered"
+    assert clip["render_meta"]["storage_key"] == f"renders/{Path(clip['render_path']).name}"
+    assert clip["render_available"] is True
+
+    Path(clip["render_path"]).unlink()
+
+    detail = auth_client.get(f"/api/v1/projects/{project_id}").json()
+    after = detail["clips"][0]
+    assert after["render_available"] is True, "the bucket copy is still playable"
+
+    video = auth_client.get(f"/api/v1/clips/{clip['id']}/video", follow_redirects=False)
+    assert video.status_code == 307
+    assert video.headers["location"].startswith("https://bucket.example/")
