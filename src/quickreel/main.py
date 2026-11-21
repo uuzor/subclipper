@@ -14,6 +14,7 @@ from .config import get_settings
 from .db import init_db
 from .logging_setup import configure_logging, get_logger
 from .media import ffmpeg
+from .rendering.renderer import recover_interrupted_renders
 
 logger = get_logger(__name__)
 
@@ -29,6 +30,7 @@ async def lifespan(app: FastAPI):
     except ffmpeg.FFmpegError as exc:
         # Fail loudly at boot: every downstream stage needs ffmpeg.
         raise RuntimeError(str(exc)) from exc
+    recover_interrupted_renders()
     logger.info("app.started", env=settings.env)
     yield
     logger.info("app.stopped")

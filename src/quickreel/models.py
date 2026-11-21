@@ -300,6 +300,9 @@ class MediaAsset(Base):
     fps: Mapped[float] = mapped_column(Float, default=0.0)
     has_audio: Mapped[bool] = mapped_column(default=True)
     probe: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Object-storage key for the source video, set when the upload was backed up.
+    # Null on a local backend, and on rows written before backups existed.
+    source_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
 
     project: Mapped[Project] = relationship(back_populates="media")

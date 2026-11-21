@@ -303,6 +303,7 @@ function ClipCard({
   const rendered = clip.status === "rendered";
   const playable = rendered && clip.render_available;
   const lost = rendered && !clip.render_available;
+  const failed = clip.status === "render_failed";
   const hookIsExcerpt = clip.hook.trim() === clip.transcript_excerpt.trim();
   return (
     <article
@@ -333,9 +334,19 @@ function ClipCard({
               ? "render expired — re-render to restore"
               : clip.status === "rendering"
                 ? "rendering…"
-                : "not rendered"}
+                : failed
+                  ? "render failed"
+                  : "not rendered"}
           </span>
         </div>
+      )}
+
+      {/* A failed render previously said only "rendering…" forever, so the one
+          piece of information that could fix it stayed in the server log. */}
+      {failed && (
+        <p className="mono clip-render-error">
+          {clip.render_error ?? "The render failed without reporting a reason."}
+        </p>
       )}
 
       <h3 className="clip-title">{clip.title}</h3>

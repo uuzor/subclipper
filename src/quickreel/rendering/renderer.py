@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -65,6 +66,23 @@ def build_srt(clip: Clip, project: Project) -> Path:
     return target
 
 
+def _scaled_dimensions(width: int, height: int, max_dimension: int) -> tuple[int, int]:
+    """Shrink ``width``x``height`` to fit ``max_dimension``, keeping the aspect.
+
+    Both sides are rounded down to even numbers because h264 with yuv420p cannot
+    encode an odd dimension, and a half-pixel crop is invisible next to a clip
+    that fails to encode at all.
+    """
+    longest = max(width, height)
+    if max_dimension <= 0 or longest <= max_dimension:
+        return width, height
+    scale = max_dimension / longest
+    return (
+        max(2, int(width * scale) // 2 * 2),
+        max(2, int(height * scale) // 2 * 2),
+    )
+
+
 def render_clip(
     session: Session,
     clip: Clip,
@@ -96,14 +114,17 @@ def render_clip(
         subtitle_path = build_srt(clip, project)
 
     output = settings.renders_dir / f"{clip.id}-{spec.key}.mp4"
+    width, height = _scaled_dimensions(
+        spec.width, spec.height, settings.render_max_dimension
+    )
     try:
         ffmpeg.render_clip(
             project.media.path,
             output,
             clip.start_seconds,
             clip.end_seconds,
-            width=spec.width,
-            height=spec.height,
+            width=width,
+            height=height,
             burn_captions=burn_captions,
             subtitle_path=subtitle_path,
             bottom_safe_pixels=spec.bottom_safe_pixels,
@@ -137,9 +158,9 @@ def render_clip(
             logger.error("render.upload_failed", clip_id=clip.id, error=str(exc))
     clip.render_meta = {
         "platform": spec.key,
-        "orientation": "vertical" if spec.height > spec.width else "horizontal",
-        "width": spec.width,
-        "height": spec.height,
+        "orientation": "vertical" if height > width else "horizontal",
+        "width": width,
+        "height": height,
         "captions_burned": burn_captions,
         "subtitle_path": str(subtitle_path) if subtitle_path else None,
         "size_bytes": output.stat().st_size if output.exists() else 0,
@@ -174,6 +195,50 @@ def render_clip_by_id(
     clip = session.get(Clip, clip_id)
     if clip is None:
         raise RuntimeError(f"clip {clip_id} not found")
-    return render_clip(
-        session, clip, burn_captions=burn_captions, vertical=vertical, platform=platform
-    )
+    try:
+        return render_clip(
+            session, clip, burn_captions=burn_captions, vertical=vertical, platform=platform
+        )
+    except Exception as exc:
+        # Every async caller - Celery worker and in-process thread alike - comes
+        # through here, and each of them used to let the exception die in a log
+        # line. Checks that run before ffmpeg starts (missing source, over-long
+        # clip for the platform) left the clip on its old status, so the page had
+        # nothing to show. Recording it here covers both paths at once.
+        _mark_render_failed(session, clip, exc)
+        raise
+
+
+def _mark_render_failed(session: Session, clip: Clip, exc: Exception) -> None:
+    """Store ``exc`` on the clip so the API can return it to the client."""
+    clip.status = ClipStatus.render_failed
+    clip.render_meta = {**(clip.render_meta or {}), "error": str(exc)}
+    try:
+        session.commit()
+    except Exception:  # noqa: BLE001 - the original error matters more
+        session.rollback()
+        logger.error("render.failure_not_recorded", clip_id=clip.id, error=str(exc))
+
+
+def recover_interrupted_renders() -> int:
+    """Reset clips left in ``rendering`` by a process that died mid-render.
+
+    A render runs in a thread inside the web process, so an OOM kill or a
+    platform restart takes it down without any chance to record a failure. The
+    row keeps ``rendering`` forever and the page polls a spinner that never
+    resolves. Nothing can be rendering at boot, so every such row is stale by
+    definition and becomes retryable again.
+    """
+    from ..db import session_scope
+
+    with session_scope() as session:
+        stale = list(session.scalars(select(Clip).where(Clip.status == ClipStatus.rendering)))
+        for clip in stale:
+            clip.status = ClipStatus.render_failed
+            clip.render_meta = {
+                **(clip.render_meta or {}),
+                "error": "render was interrupted by a server restart; render again to retry",
+            }
+        if stale:
+            logger.warning("render.recovered", clips=len(stale))
+        return len(stale)

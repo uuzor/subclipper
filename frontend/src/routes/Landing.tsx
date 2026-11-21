@@ -54,6 +54,7 @@ const DEMO_CLIPS: Clip[] = [
     render_path: null,
     render_meta: {},
     render_available: false,
+    render_error: null,
   },
   {
     id: "d2",
@@ -96,6 +97,7 @@ const DEMO_CLIPS: Clip[] = [
     render_path: null,
     render_meta: {},
     render_available: false,
+    render_error: null,
   },
   {
     id: "d3",
@@ -138,6 +140,7 @@ const DEMO_CLIPS: Clip[] = [
     render_path: null,
     render_meta: {},
     render_available: false,
+    render_error: null,
   },
 ];
 

@@ -33,6 +33,7 @@ from ..media import ffmpeg
 from ..media.downloader import DownloadError, get_downloader
 from ..media.url_source import SourceUrlError, validate_source_url
 from ..models import Clip, ClipStatus, MediaAsset, Project, ProjectStatus, Transcript
+from ..storage import get_storage
 
 logger = get_logger(__name__)
 
@@ -125,6 +126,9 @@ class Pipeline:
         if project.source_kind == "url" and (not asset.path or not Path(asset.path).exists()):
             self._download_remote(project, asset)
 
+        if asset.source_key and (not asset.path or not Path(asset.path).exists()):
+            self._restore_source(project, asset)
+
         if not asset.path or not Path(asset.path).exists():
             project.error = f"media file missing at {asset.path}"
             self._set_status(project, ProjectStatus.ingesting_failed)
@@ -150,6 +154,23 @@ class Pipeline:
             size=f"{info.width}x{info.height}",
         )
         return asset
+
+    def _restore_source(self, project: Project, asset: MediaAsset) -> None:
+        """Fetch the source video back from object storage into the uploads dir.
+
+        A container restart wipes the uploads directory, and the media row then
+        points at a file that no longer exists. Without this the only way forward
+        is asking the user to upload the same video again.
+        """
+        if not asset.path:
+            asset.path = str(self.settings.uploads_dir / f"{project.id}.mp4")
+        try:
+            get_storage().get(asset.source_key, asset.path)
+        except Exception as exc:  # noqa: BLE001 - reported as a missing source
+            project.error = f"could not restore source video from storage: {exc}"
+            raise PipelineError(project.error) from exc
+        self.session.commit()
+        logger.info("ingest.source_restored", project_id=project.id, key=asset.source_key)
 
     def _download_remote(self, project: Project, asset: MediaAsset) -> None:
         """Fetch ``project.source_url`` into the uploads directory.
@@ -189,6 +210,16 @@ class Pipeline:
 
         asset.path = str(result.path)
         asset.size_bytes = result.size_bytes
+        # Keep a durable copy for the same reason uploads get one: the download
+        # is expensive to repeat and the local file does not survive a restart.
+        storage = get_storage()
+        if storage.is_remote:
+            key = f"sources/{project.id}{Path(result.path).suffix}"
+            try:
+                storage.put(result.path, key)
+                asset.source_key = key
+            except Exception as exc:  # noqa: BLE001 - the local copy still works
+                logger.error("ingest.backup_failed", project_id=project.id, error=str(exc))
         if result.info.title and project.title in {"", "Untitled project"}:
             project.title = result.info.title[:500]
         if result.info.raw:

@@ -46,8 +46,13 @@ FROM python:3.12-slim-bookworm AS runtime
 
 # ffmpeg and ffprobe are hard requirements: the app refuses to boot without
 # them, so they belong in the image rather than in a start command.
+# fonts-dejavu-core is not optional either: libass resolves the caption font
+# through fontconfig, and with no font installed the subtitles filter warns
+# "failed to find any fallback with glyph 0x0" and burns in nothing. The render
+# still exits 0, so the clip looks fine and simply has no captions.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg ca-certificates fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1 \

@@ -38,6 +38,20 @@ class MediaInfo:
         return self.width / self.height if self.height else 0.0
 
 
+def _failure_detail(stderr: str) -> str:
+    """The part of ffmpeg's stderr that explains the failure.
+
+    ffmpeg prints its whole build configuration before it gets to the problem,
+    and that banner is the first ~1.5KB of stderr. Reporting the tail means the
+    reason reaches the clip row and the page; reporting the head buries it under
+    library versions and nobody can read the error the user is asked to send.
+    """
+    lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+    if not lines:
+        return "ffmpeg exited without a message"
+    return " | ".join(lines[-3:])
+
+
 def _run(cmd: list[str], timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     logger.debug("ffmpeg.run", cmd=cmd)
     try:
@@ -49,8 +63,8 @@ def _run(cmd: list[str], timeout: int | None = None) -> subprocess.CompletedProc
             check=True,
         )
     except subprocess.CalledProcessError as exc:  # pragma: no cover - error path
-        tail = (exc.stderr or "")[-2000:]
-        raise FFmpegError(f"{cmd[0]} failed ({exc.returncode}): {tail}") from exc
+        detail = _failure_detail(exc.stderr)
+        raise FFmpegError(f"{cmd[0]} failed ({exc.returncode}): {detail}") from exc
     except subprocess.TimeoutExpired as exc:  # pragma: no cover - error path
         raise FFmpegError(f"{cmd[0]} timed out after {timeout}s") from exc
 
@@ -475,7 +489,12 @@ def render_clip(
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        settings.render_preset,
+        # x264's default lookahead keeps 40 frames of analysis per thread, which
+        # at 1080x1920 is most of a 512MB instance on its own. A short lookahead
+        # costs a little compression efficiency and saves ~100MB per render.
+        "-x264-params",
+        f"rc-lookahead={settings.render_lookahead}:ref=2",
         "-crf",
         "20",
         "-maxrate",

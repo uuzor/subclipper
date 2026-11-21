@@ -195,8 +195,28 @@ def _render_in_background(
                 )
         except Exception as exc:  # noqa: BLE001 - the clip records the failure
             logger.error("render.background_failed", clip_id=clip_id, error=str(exc))
+            _record_render_failure(clip_id, exc)
 
     threading.Thread(target=work, name=f"render-{clip_id}", daemon=True).start()
+
+
+def _record_render_failure(clip_id: str, exc: Exception) -> None:
+    """Make a failed background render visible on the clip.
+
+    ``render_clip`` records its own ffmpeg failures, but several checks run before
+    that - a missing source file, an over-long clip for the platform - and those
+    used to reach only the log. The clip then kept whatever status it had, so the
+    page showed nothing at all.
+    """
+    try:
+        with session_scope() as session:
+            clip = session.get(Clip, clip_id)
+            if clip is None:
+                return
+            clip.status = ClipStatus.render_failed
+            clip.render_meta = {**(clip.render_meta or {}), "error": str(exc)}
+    except Exception as inner:  # noqa: BLE001 - never mask the original failure
+        logger.error("render.failure_not_recorded", clip_id=clip_id, error=str(inner))
 
 
 @router.get("/export-platforms")

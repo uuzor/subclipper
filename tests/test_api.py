@@ -90,6 +90,64 @@ def test_render_and_download_top_clip(auth_client, sample_video):
     assert len(download.content) > 0
 
 
+def test_render_reports_missing_source_instead_of_hanging(auth_client, sample_video):
+    """A render whose source video is gone must surface an error on the clip.
+
+    On a host without a persistent volume the upload disappears on restart while
+    the database row survives, so ffmpeg fails with "No such file or directory".
+    That failure used to reach only the server log, leaving the UI polling a
+    spinner forever with nothing to show the user.
+    """
+    project = _create_and_upload(auth_client, sample_video)
+    project_id = project["id"]
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+
+    media_path = Path(project["media"]["path"])
+    assert media_path.is_file()
+    media_path.unlink()
+
+    response = auth_client.post(
+        f"/api/v1/projects/{project_id}/render",
+        json={"max_clips": 1, "burn_captions": True},
+    )
+    # A synchronous render reports the failure in the response itself...
+    assert response.status_code == 500
+    assert "No such file or directory" in response.json()["detail"]
+
+    # ...and the clip keeps the reason, so the page can show it after a reload
+    # even when nobody was watching the request.
+    clip = auth_client.get(f"/api/v1/projects/{project_id}/clips").json()[0]
+    assert clip["status"] == "render_failed"
+    assert "No such file or directory" in clip["render_error"]
+
+
+def test_interrupted_render_becomes_retryable(auth_client, sample_video):
+    """A clip stuck in ``rendering`` after a crash is reset at the next boot.
+
+    Rendering runs in a thread inside the web process, so an OOM kill leaves the
+    row mid-flight. Nothing can be rendering at startup, so the sweep marks it
+    failed with a reason rather than leaving the page spinning.
+    """
+    from quickreel.db import session_scope
+    from quickreel.models import Clip, ClipStatus
+    from quickreel.rendering.renderer import recover_interrupted_renders
+
+    project = _create_and_upload(auth_client, sample_video)
+    project_id = project["id"]
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+    clip_id = auth_client.get(f"/api/v1/projects/{project_id}/clips").json()[0]["id"]
+
+    with session_scope() as session:
+        clip = session.get(Clip, clip_id)
+        clip.status = ClipStatus.rendering
+
+    assert recover_interrupted_renders() >= 1
+
+    clip = auth_client.get(f"/api/v1/projects/{project_id}/clips").json()[0]
+    assert clip["status"] == "render_failed"
+    assert "interrupted" in (clip["render_error"] or "")
+
+
 def test_download_before_render_returns_conflict(auth_client, sample_video, no_auto_render):
     project = _create_and_upload(auth_client, sample_video)
     project_id = project["id"]

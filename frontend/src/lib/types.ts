@@ -85,6 +85,8 @@ export interface Clip {
   render_meta: Record<string, unknown>;
   /** False when the row says rendered but the MP4 is missing on disk. */
   render_available: boolean;
+  /** Why the last render failed, when it did. */
+  render_error: string | null;
 }
 
 export interface Project {

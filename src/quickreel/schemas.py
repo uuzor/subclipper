@@ -84,6 +84,10 @@ class ClipOut(BaseModel):
     # The client needs to tell "rendered, playable" from "rendered, bytes gone"
     # so it can offer a re-render instead of painting an empty <video>.
     render_available: bool = False
+    # A render that failed recorded why in render_meta. Lifting it out means the
+    # page can show the reason instead of an indefinite "rendering…" spinner,
+    # which is all a caller could see while the cause sat in the server log.
+    render_error: str | None = None
 
     _coerce_components = field_validator("score_components", "score_breakdown", mode="before")(
         _none_to_empty
@@ -99,6 +103,8 @@ class ClipOut(BaseModel):
         self.render_available = bool(self.render_path) and (
             Path(self.render_path).is_file() or bool(self.render_meta.get("storage_key"))
         )
+        raw_error = self.render_meta.get("error")
+        self.render_error = raw_error if isinstance(raw_error, str) and raw_error else None
         return self
 
     @model_validator(mode="after")

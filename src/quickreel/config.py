@@ -154,6 +154,20 @@ class Settings(BaseSettings):
     # its memory limit is far smaller - 16 threads needs well over 512MB and the
     # OOM killer takes the whole service down mid-render.
     render_threads: int = 2
+    # x264 preset for clip exports. ``ultrafast`` peaks around 273MB at 1080x1920
+    # against 470MB for ``veryfast``; on a 512MB instance the difference is a
+    # finished clip versus a restart that also destroys the uploaded source.
+    # Hosts with real memory can raise this to ``veryfast`` for smaller files.
+    render_preset: str = "ultrafast"
+    # Frames of lookahead x264 buffers per thread. The default 40 is a large
+    # slice of a small instance's memory for a negligible quality gain on a
+    # short vertical clip.
+    render_lookahead: int = 10
+    # Longest side of a rendered clip. The default keeps platform-native sizes;
+    # an instance short on memory can set 1280 to render 720x1280, which measured
+    # 314MB against 470MB at 1080x1920. Scaling happens at encode time, so the
+    # export keeps the platform's aspect ratio either way.
+    render_max_dimension: int = 1920
     max_upload_mb: int = 2048
     # Chunk size advertised to clients for resumable uploads. Cloudflare rejects
     # request bodies over 100MiB, so chunks must stay comfortably below that or

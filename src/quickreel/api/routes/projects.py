@@ -30,6 +30,7 @@ from ...schemas import (
     UploadStatusOut,
     UrlIngestIn,
 )
+from ...storage import get_storage
 from ..deps import current_workspace, get_scoped_project
 
 logger = get_logger(__name__)
@@ -188,9 +189,30 @@ def upload_video(
     project.source_kind = "upload"
     project.status = ProjectStatus.created
     project.error = None
+    _backup_source(asset, destination)
     db.commit()
     logger.info("upload.stored", project_id=project.id, bytes=size)
     return project
+
+
+def _backup_source(asset: MediaAsset, path: Path) -> None:
+    """Keep a durable copy of the upload so a restart cannot orphan the project.
+
+    The uploaded file is the one artefact that cannot be regenerated: lose it and
+    every clip derived from it is unrenderable, which is exactly what a container
+    restart on a host without a volume does. Recording the key lets ``ingest``
+    fetch the source back instead of failing with a missing-file error.
+    """
+    storage = get_storage()
+    if not storage.is_remote:
+        return
+    key = f"sources/{asset.project_id}{path.suffix}"
+    try:
+        storage.put(path, key)
+    except Exception as exc:  # noqa: BLE001 - the local copy still works today
+        logger.error("upload.backup_failed", project_id=asset.project_id, error=str(exc))
+        return
+    asset.source_key = key
 
 
 def settings_uploads_path(project_id: str, filename: str | None) -> Path:
