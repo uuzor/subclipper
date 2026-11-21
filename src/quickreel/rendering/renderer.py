@@ -7,6 +7,7 @@ ceiling - comes from ``rendering.platforms``.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from sqlalchemy import select
@@ -83,6 +84,30 @@ def _scaled_dimensions(width: int, height: int, max_dimension: int) -> tuple[int
     )
 
 
+_render_locks: dict[tuple[str, str], threading.Lock] = {}
+_locks_guard = threading.Lock()
+
+
+def _render_lock(clip_id: str, spec_key: str) -> threading.Lock:
+    """One lock per clip+platform, so two renders cannot share an output file.
+
+    Two entry points render the same clip: the pipeline auto-render that runs at
+    the end of processing, and the ``/render`` endpoint. Both write the same
+    deterministic path (``{clip.id}-{spec.key}.mp4``), and the pipeline sets the
+    project to ``ready`` *before* it renders, so a client that reacts to ``ready``
+    by calling ``/render`` overlaps with it. Two ffmpeg processes writing one
+    path interleave their ``moov``/``mdat`` boxes and leave a file that probes
+    fine but has no decodable frames. A lock is enough because the process model
+    is one uvicorn worker; the DB status is the cross-process guard.
+    """
+    key = (clip_id, spec_key)
+    with _locks_guard:
+        lock = _render_locks.get(key)
+        if lock is None:
+            lock = _render_locks[key] = threading.Lock()
+        return lock
+
+
 def render_clip(
     session: Session,
     clip: Clip,
@@ -106,67 +131,87 @@ def render_clip(
             f"{spec.max_seconds:.0f}s {spec.label} limit"
         )
 
-    clip.status = ClipStatus.rendering
-    session.commit()
-
-    subtitle_path: Path | None = None
-    if burn_captions:
-        subtitle_path = build_srt(clip, project)
-
-    output = settings.renders_dir / f"{clip.id}-{spec.key}.mp4"
-    width, height = _scaled_dimensions(
-        spec.width, spec.height, settings.render_max_dimension
-    )
+    lock = _render_lock(clip.id, spec.key)
+    if not lock.acquire(blocking=False):
+        # Another render of this clip is already writing the same file. Waiting
+        # would just duplicate the work, and running would corrupt the output, so
+        # leave the clip to the render already in flight. The status is left
+        # alone: committing ``rendering`` here could land after the other render
+        # has already committed ``rendered``, stranding the clip until restart.
+        logger.info("render.already_running", clip_id=clip.id, platform=spec.key)
+        session.refresh(clip)
+        return clip
     try:
-        ffmpeg.render_clip(
-            project.media.path,
-            output,
-            clip.start_seconds,
-            clip.end_seconds,
-            width=width,
-            height=height,
-            burn_captions=burn_captions,
-            subtitle_path=subtitle_path,
-            bottom_safe_pixels=spec.bottom_safe_pixels,
-            video_bitrate=spec.video_bitrate,
-            audio_bitrate=spec.audio_bitrate,
-        )
-    except Exception as exc:  # noqa: BLE001 - surfaced to the API
-        clip.status = ClipStatus.render_failed
-        clip.render_meta = {"error": str(exc), "platform": spec.key}
+        clip.status = ClipStatus.rendering
         session.commit()
-        logger.error("render.failed", clip_id=clip.id, platform=spec.key, error=str(exc))
-        raise
 
-    clip.render_path = str(output)
-    clip.status = ClipStatus.rendered
-    storage_key = None
-    storage = get_storage()
-    if storage.is_remote:
-        # Only a remote copy outlives the container, so only that is worth
-        # recording as a fallback. Uploading on a local backend would just
-        # duplicate the file next to itself and make a deleted MP4 still read
-        # as playable. The key (not the returned URI) is stored because that is
-        # what every read path - url_for, get, exists - takes.
-        key = f"renders/{output.name}"
+        subtitle_path: Path | None = None
+        if burn_captions:
+            subtitle_path = build_srt(clip, project)
+
+        output = settings.renders_dir / f"{clip.id}-{spec.key}.mp4"
+        # Write beside the target and rename once complete. ffmpeg writes the
+        # moov atom last, so a partial file at the final path is a valid-looking
+        # container with no decodable frames - exactly what a client would cache
+        # and fail to play. A rename is atomic, so the path only ever holds a
+        # finished render.
+        partial = output.with_name(f"{output.stem}.partial{output.suffix}")
+        width, height = _scaled_dimensions(
+            spec.width, spec.height, settings.render_max_dimension
+        )
         try:
-            storage.put(output, key)
-            storage_key = key
-        except Exception as exc:  # noqa: BLE001 - local file is still usable
-            # A failed upload must not fail a render that produced a playable
-            # file: the local copy still serves until the next restart.
-            logger.error("render.upload_failed", clip_id=clip.id, error=str(exc))
-    clip.render_meta = {
-        "platform": spec.key,
-        "orientation": "vertical" if height > width else "horizontal",
-        "width": width,
-        "height": height,
-        "captions_burned": burn_captions,
-        "subtitle_path": str(subtitle_path) if subtitle_path else None,
-        "size_bytes": output.stat().st_size if output.exists() else 0,
-        "storage_key": storage_key,
-    }
-    session.commit()
+            ffmpeg.render_clip(
+                project.media.path,
+                partial,
+                clip.start_seconds,
+                clip.end_seconds,
+                width=width,
+                height=height,
+                burn_captions=burn_captions,
+                subtitle_path=subtitle_path,
+                bottom_safe_pixels=spec.bottom_safe_pixels,
+                video_bitrate=spec.video_bitrate,
+                audio_bitrate=spec.audio_bitrate,
+            )
+            partial.replace(output)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the API
+            partial.unlink(missing_ok=True)
+            clip.status = ClipStatus.render_failed
+            clip.render_meta = {"error": str(exc), "platform": spec.key}
+            session.commit()
+            logger.error("render.failed", clip_id=clip.id, platform=spec.key, error=str(exc))
+            raise
+        clip.render_path = str(output)
+        clip.status = ClipStatus.rendered
+        storage_key = None
+        storage = get_storage()
+        if storage.is_remote:
+            # Only a remote copy outlives the container, so only that is worth
+            # recording as a fallback. Uploading on a local backend would just
+            # duplicate the file next to itself and make a deleted MP4 still
+            # read as playable. The key (not the returned URI) is stored because
+            # that is what every read path - url_for, get, exists - takes.
+            key = f"renders/{output.name}"
+            try:
+                storage.put(output, key)
+                storage_key = key
+            except Exception as exc:  # noqa: BLE001 - local file is still usable
+                # A failed upload must not fail a render that produced a
+                # playable file: the local copy still serves until restart.
+                logger.error("render.upload_failed", clip_id=clip.id, error=str(exc))
+        clip.render_meta = {
+            "platform": spec.key,
+            "orientation": "vertical" if height > width else "horizontal",
+            "width": width,
+            "height": height,
+            "captions_burned": burn_captions,
+            "subtitle_path": str(subtitle_path) if subtitle_path else None,
+            "size_bytes": output.stat().st_size if output.exists() else 0,
+            "storage_key": storage_key,
+        }
+        session.commit()
+    finally:
+        lock.release()
     logger.info("render.done", clip_id=clip.id, platform=spec.key, path=str(output))
     return clip
 

@@ -716,3 +716,101 @@ def test_a_remote_render_stays_playable_when_the_local_file_is_gone(
     video = auth_client.get(f"/api/v1/clips/{clip['id']}/video", follow_redirects=False)
     assert video.status_code == 307
     assert video.headers["location"].startswith("https://bucket.example/")
+
+
+def test_concurrent_renders_of_one_clip_cannot_corrupt_the_output(
+    auth_client, sample_video, monkeypatch
+):
+    """Two renders of the same clip must not interleave writes to one file.
+
+    The pipeline auto-renders the top moments and flips the project to ``ready``
+    *before* rendering, so a client that reacts to ``ready`` by calling
+    ``/render`` starts a second ffmpeg on the same deterministic output path.
+    Both write a ``moov`` atom, and the loser's bytes land mid-file: the result
+    probes as a valid MP4 but decodes zero frames.
+    """
+    import subprocess
+    import threading
+
+    from quickreel.db import get_sessionmaker
+    from quickreel.models import Clip
+    from quickreel.rendering import renderer
+
+    project = _create_and_upload(auth_client, sample_video)
+    project_id = project["id"]
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+
+    clip_id = auth_client.get(f"/api/v1/projects/{project_id}/clips").json()[0]["id"]
+
+    # Hold the first render inside ffmpeg so the second arrives while the file is
+    # open, which is the interleaving that produced the corrupt production clip.
+    started = threading.Event()
+    release = threading.Event()
+    original = renderer.ffmpeg.render_clip
+
+    def slow_render(*args, **kwargs):
+        started.set()
+        release.wait(timeout=30)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(renderer.ffmpeg, "render_clip", slow_render)
+
+    def run() -> None:
+        session = get_sessionmaker()()
+        try:
+            clip = session.get(Clip, clip_id)
+            renderer.render_clip(session, clip)
+        finally:
+            session.close()
+
+    first = threading.Thread(target=run)
+    first.start()
+    assert started.wait(timeout=30), "first render never reached ffmpeg"
+
+    # Second caller, while the first is mid-render: it must not run concurrently.
+    second_session = get_sessionmaker()()
+    try:
+        second_clip = second_session.get(Clip, clip_id)
+        renderer.render_clip(second_session, second_clip)
+    finally:
+        second_session.close()
+
+    release.set()
+    first.join(timeout=120)
+    assert not first.is_alive()
+
+    monkeypatch.setattr(renderer.ffmpeg, "render_clip", original)
+
+    session = get_sessionmaker()()
+    try:
+        clip = session.get(Clip, clip_id)
+        output = Path(clip.render_path)
+        assert clip.status == "rendered"
+    finally:
+        session.close()
+
+    # Exactly one moov, and the container is not truncated.
+    import struct
+
+    data = output.read_bytes()
+    offset = 0
+    boxes = []
+    while offset + 8 <= len(data):
+        size = struct.unpack(">I", data[offset : offset + 4])[0]
+        boxes.append((data[offset + 4 : offset + 8], offset + size <= len(data)))
+        if size < 8:
+            break
+        offset += size
+    assert sum(1 for name, _ in boxes if name == b"moov") == 1, boxes
+    assert all(ok for _, ok in boxes), boxes
+
+    decode = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(output), "-f", "null", "-"],
+        capture_output=True,
+        text=True,
+    )
+    assert decode.returncode == 0, decode.stderr[:500]
+    assert "Invalid NAL unit size" not in decode.stderr
+
+    # The .partial file must not survive a successful render.
+    assert not list(output.parent.glob(f"{output.stem}.partial*"))
