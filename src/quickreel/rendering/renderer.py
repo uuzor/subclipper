@@ -86,6 +86,31 @@ def _scaled_dimensions(width: int, height: int, max_dimension: int) -> tuple[int
 
 _render_locks: dict[tuple[str, str], threading.Lock] = {}
 _locks_guard = threading.Lock()
+_render_slots: threading.BoundedSemaphore | None = None
+_render_slots_size = 0
+_slots_guard = threading.Lock()
+
+
+class RenderQueueTimeout(RuntimeError):
+    """No render slot opened up in time."""
+
+
+def _render_semaphore(limit: int) -> threading.BoundedSemaphore:
+    """The process-wide cap on simultaneous ffmpeg renders.
+
+    Built lazily and rebuilt if the configured limit changes, because the
+    settings object is cached and tests clear that cache. One uvicorn worker per
+    container means a process-wide semaphore is the whole story: there is no
+    second process whose ffmpeg could add to the same memory ceiling.
+    """
+    global _render_slots, _render_slots_size
+
+    limit = max(1, limit)
+    with _slots_guard:
+        if _render_slots is None or _render_slots_size != limit:
+            _render_slots = threading.BoundedSemaphore(limit)
+            _render_slots_size = limit
+        return _render_slots
 
 
 def _render_lock(clip_id: str, spec_key: str) -> threading.Lock:
@@ -141,6 +166,25 @@ def render_clip(
         logger.info("render.already_running", clip_id=clip.id, platform=spec.key)
         session.refresh(clip)
         return clip
+
+    # Queue for a render slot before touching status. Several clips rendering at
+    # once is what exhausts a small instance's memory, so the wait happens here,
+    # where nothing is marked ``rendering`` yet and no ffmpeg is running.
+    slots = _render_semaphore(settings.render_max_concurrent)
+    timeout = settings.render_queue_timeout_seconds
+    if not slots.acquire(timeout=timeout if timeout > 0 else None):
+        lock.release()
+        clip.status = ClipStatus.render_failed
+        clip.render_meta = {
+            "error": f"render queue was busy for {timeout}s; try again",
+            "platform": spec.key,
+        }
+        session.commit()
+        logger.error("render.queue_timeout", clip_id=clip.id, platform=spec.key)
+        raise RenderQueueTimeout(
+            f"clip {clip.id} waited {timeout}s for a free render slot"
+        )
+
     try:
         clip.status = ClipStatus.rendering
         session.commit()
@@ -211,6 +255,7 @@ def render_clip(
         }
         session.commit()
     finally:
+        slots.release()
         lock.release()
     logger.info("render.done", clip_id=clip.id, platform=spec.key, path=str(output))
     return clip

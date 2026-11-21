@@ -168,6 +168,15 @@ class Settings(BaseSettings):
     # 314MB against 470MB at 1080x1920. Scaling happens at encode time, so the
     # export keeps the platform's aspect ratio either way.
     render_max_dimension: int = 1920
+    # How many clips may render at once across the whole process. Each ffmpeg
+    # peaks around 240MB at 720x1280, so two on a 512MB instance (518MB measured)
+    # trip the OOM killer and take the service down mid-render - which the edge
+    # proxy reports as a 503. A batch of clips queues on this instead of racing;
+    # a host with real memory can raise it. Renders that cannot start within
+    # ``render_queue_timeout_seconds`` fail with a clear message rather than
+    # sitting in ``rendering`` forever.
+    render_max_concurrent: int = 1
+    render_queue_timeout_seconds: int = 900
     max_upload_mb: int = 2048
     # Chunk size advertised to clients for resumable uploads. Cloudflare rejects
     # request bodies over 100MiB, so chunks must stay comfortably below that or

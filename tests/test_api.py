@@ -814,3 +814,82 @@ def test_concurrent_renders_of_one_clip_cannot_corrupt_the_output(
 
     # The .partial file must not survive a successful render.
     assert not list(output.parent.glob(f"{output.stem}.partial*"))
+
+
+def test_renders_are_capped_by_the_concurrency_limit(
+    auth_client, sample_video, monkeypatch
+):
+    """No more than ``render_max_concurrent`` ffmpeg renders may run at once.
+
+    Each render peaks around 240MB, so an unbounded batch on a small instance
+    exhausts memory and the OOM killer restarts the service mid-render. The
+    semaphore serialises them instead, and the wait must not leave a clip stuck
+    in ``rendering``.
+    """
+    import threading
+    import time
+
+    from quickreel.config import get_settings
+    from quickreel.db import get_sessionmaker
+    from quickreel.models import Clip
+    from quickreel.rendering import renderer
+
+    settings = get_settings()
+    monkeypatch.setattr(
+        renderer, "get_settings", lambda: settings.model_copy(
+            update={"render_max_concurrent": 1, "render_queue_timeout_seconds": 60}
+        )
+    )
+    # Force the semaphore to be rebuilt for the patched limit.
+    monkeypatch.setattr(renderer, "_render_slots", None)
+    monkeypatch.setattr(renderer, "_render_slots_size", 0)
+
+    project = _create_and_upload(auth_client, sample_video)
+    project_id = project["id"]
+    assert auth_client.post(f"/api/v1/projects/{project_id}/process").status_code == 202
+
+    clip_ids = [c["id"] for c in auth_client.get(f"/api/v1/projects/{project_id}/clips").json()]
+    assert len(clip_ids) >= 2, "need two clips to prove serialisation"
+
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+    original = renderer.ffmpeg.render_clip
+
+    def counting_render(*args, **kwargs):
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(0.2)  # widen the overlap window
+            return original(*args, **kwargs)
+        finally:
+            with guard:
+                active -= 1
+
+    monkeypatch.setattr(renderer.ffmpeg, "render_clip", counting_render)
+
+    def run(clip_id: str) -> None:
+        session = get_sessionmaker()()
+        try:
+            clip = session.get(Clip, clip_id)
+            renderer.render_clip(session, clip)
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=run, args=(cid,)) for cid in clip_ids]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=180)
+    assert all(not t.is_alive() for t in threads)
+
+    assert peak == 1, f"concurrency cap breached: {peak} renders ran at once"
+
+    session = get_sessionmaker()()
+    try:
+        statuses = [session.get(Clip, cid).status for cid in clip_ids]
+    finally:
+        session.close()
+    assert all(s == "rendered" for s in statuses), statuses
